@@ -6,7 +6,8 @@ import { securityConfig } from './security-config';
 import { randomUUID } from 'node:crypto';
 import { ACTIVE_JOB_STATUSES } from './domain-constants';
 import type { AuthUser } from './common';
-import { evaluatePolicies, eventsInWindow, quotaPoliciesFromGroups, retryAfterSeconds, usedPoints } from './generation-quota';
+import { evaluatePolicies, eventsInWindow, quotaPoliciesFromGroups, retryAfterSeconds } from './generation-quota';
+import { runsBackgroundMaintenance } from './process-role';
 
 @Injectable()
 export class QuotaService implements OnModuleInit, OnModuleDestroy {
@@ -17,6 +18,7 @@ export class QuotaService implements OnModuleInit, OnModuleDestroy {
   async onModuleInit() {
     await this.ensureUsageRows();
     await this.prisma.globalUsage.upsert({ where: { id: 'global' }, create: { id: 'global' }, update: {} });
+    if (!runsBackgroundMaintenance()) return;
     await this.reconcile().catch((error) => this.logger.warn(`quota reconciliation failed: ${error instanceof Error ? error.message : 'unknown'}`));
     this.reconciliationTimer = setInterval(() => void this.reconcile(), 60 * 60 * 1000);
     this.reconciliationTimer.unref();
@@ -89,30 +91,32 @@ export class QuotaService implements OnModuleInit, OnModuleDestroy {
 
   async currentUsage(user: Pick<AuthUser, 'id' | 'role' | 'groupIds'>) {
     const now = new Date();
-    const [usage, groups] = await Promise.all([
+    const [usage, groups, libraryAssetCount] = await Promise.all([
       this.prisma.userUsage.findUnique({ where: { userId: user.id }, select: { storageBytes: true } }),
       user.groupIds.length ? this.prisma.userGroup.findMany({
         where: { id: { in: user.groupIds } },
         select: { id: true, name: true, quotaWindow: true, quotaPoints: true },
         orderBy: { name: 'asc' },
       }) : Promise.resolve([]),
+      this.prisma.asset.count({ where: { userId: user.id, deletedAt: null, role: { in: ['UPLOAD', 'OUTPUT'] } } }),
     ]);
     const policies = user.role === 'ADMIN' ? [] : quotaPoliciesFromGroups(groups);
-    const maxWindow = policies.reduce((max, policy) => Math.max(max, policy.windowSeconds), 0);
-    const events = maxWindow ? await this.prisma.quotaEvent.findMany({
-      where: { userId: user.id, createdAt: { gt: new Date(now.getTime() - maxWindow * 1000) } },
+    const stats = await this.quotaWindowStats(this.prisma, user.id, policies, now);
+    const exhausted = policies.filter((policy) => (stats.get(policy.windowSeconds)?.used ?? 0) >= policy.points);
+    const retryEvents = exhausted.length ? await this.prisma.quotaEvent.findMany({
+      where: { userId: user.id, createdAt: { gt: new Date(now.getTime() - Math.max(...exhausted.map((policy) => policy.windowSeconds)) * 1000) } },
       select: { createdAt: true, points: true },
       orderBy: { createdAt: 'asc' },
     }) : [];
-    const pointEvents = events.map((event) => ({ createdAt: event.createdAt, points: event.points }));
     return {
       storageBytes: usage?.storageBytes.toString() ?? '0',
       storageQuotaBytes: securityConfig.storageBytesPerUser().toString(),
+      libraryAssetCount,
       policies: policies.map((policy) => {
-        const inWindow = eventsInWindow(pointEvents, now, policy.windowSeconds);
-        const used = usedPoints(inWindow);
+        const window = stats.get(policy.windowSeconds);
+        const used = window?.used ?? 0;
         const remaining = Math.max(0, policy.points - used);
-        const oldest = inWindow[0];
+        const oldest = window?.oldest ?? null;
         return {
           groupId: policy.groupId,
           groupName: policy.name,
@@ -120,8 +124,8 @@ export class QuotaService implements OnModuleInit, OnModuleDestroy {
           points: policy.points,
           used,
           remaining,
-          resetAt: oldest ? new Date(oldest.createdAt.getTime() + policy.windowSeconds * 1000).toISOString() : null,
-          retryAfterSeconds: remaining === 0 ? retryAfterSeconds(inWindow, policy.windowSeconds, policy.points, 1, now) : 0,
+          resetAt: oldest ? new Date(oldest.getTime() + policy.windowSeconds * 1000).toISOString() : null,
+          retryAfterSeconds: remaining === 0 ? retryAfterSeconds(eventsInWindow(retryEvents, now, policy.windowSeconds), policy.windowSeconds, policy.points, 1, now) : 0,
         };
       }),
     };
@@ -136,14 +140,36 @@ export class QuotaService implements OnModuleInit, OnModuleDestroy {
     const policies = quotaPoliciesFromGroups(groups);
     if (!policies.length) return;
     const now = new Date();
-    const maxWindow = policies.reduce((max, policy) => Math.max(max, policy.windowSeconds), 0);
+    const stats = await this.quotaWindowStats(tx, user.id, policies, now);
+    const blocked = policies.filter((policy) => (stats.get(policy.windowSeconds)?.used ?? 0) + points > policy.points);
+    if (!blocked.length) return;
     const events = await tx.quotaEvent.findMany({
-      where: { userId: user.id, createdAt: { gt: new Date(now.getTime() - maxWindow * 1000) } },
+      where: { userId: user.id, createdAt: { gt: new Date(now.getTime() - Math.max(...blocked.map((policy) => policy.windowSeconds)) * 1000) } },
       select: { createdAt: true, points: true },
       orderBy: { createdAt: 'asc' },
     });
-    const result = evaluatePolicies(policies, events, points, now);
+    const result = evaluatePolicies(blocked, events, points, now);
     if (!result.ok) throw this.exceeded('生成积分已达上限', result.retryAfterSeconds);
+  }
+
+  private async quotaWindowStats(
+    db: { quotaEvent: { aggregate: PrismaService['quotaEvent']['aggregate'] } },
+    userId: string,
+    policies: ReturnType<typeof quotaPoliciesFromGroups>,
+    now: Date,
+  ) {
+    const windows = [...new Set(policies.map((policy) => policy.windowSeconds))];
+    const stats = new Map<number, { used: number; oldest: Date | null }>();
+    await Promise.all(windows.map(async (windowSeconds) => {
+      const since = new Date(now.getTime() - windowSeconds * 1000);
+      const aggregate = await db.quotaEvent.aggregate({
+        where: { userId, createdAt: { gt: since } },
+        _sum: { points: true },
+        _min: { createdAt: true },
+      });
+      stats.set(windowSeconds, { used: aggregate._sum.points ?? 0, oldest: aggregate._min.createdAt ?? null });
+    }));
+    return stats;
   }
 
   async acquireSse(userId: string) {

@@ -6,31 +6,46 @@ export type DownloadResult = {
 };
 
 const DEFAULT_DOWNLOAD_TIMEOUT_MS = 60_000;
+const DEFAULT_DOWNLOAD_CONCURRENCY = 4;
 
-export async function downloadFiles(items: DownloadItem[], onProgress?: (completed: number, total: number) => void, timeoutMs = DEFAULT_DOWNLOAD_TIMEOUT_MS): Promise<DownloadResult> {
+export async function downloadFiles(
+  items: DownloadItem[],
+  onProgress?: (completed: number, total: number) => void,
+  timeoutMs = DEFAULT_DOWNLOAD_TIMEOUT_MS,
+  concurrency = DEFAULT_DOWNLOAD_CONCURRENCY,
+): Promise<DownloadResult> {
   const failed: string[] = [];
   let completed = 0;
   onProgress?.(0, items.length);
-  for (const item of items) {
-    try {
-      const response = await fetch(item.url, { credentials: 'include', cache: 'no-store', signal: AbortSignal.timeout(timeoutMs) });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const blob = await response.blob();
-      const objectUrl = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = objectUrl;
-      anchor.download = item.name;
-      anchor.rel = 'noopener';
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30_000);
-      completed += 1;
-    } catch {
-      failed.push(item.name);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, concurrency), Math.max(items.length, 1)) }, async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      const item = items[index];
+      try {
+        const response = await fetch(item.url, {
+          credentials: 'include',
+          headers: { Range: 'bytes=0-0' },
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        if (!response.ok && response.status !== 206) throw new Error(`HTTP ${response.status}`);
+        if (response.body) await response.body.cancel().catch(() => undefined);
+        const anchor = document.createElement('a');
+        anchor.href = item.url;
+        anchor.download = item.name;
+        anchor.rel = 'noopener';
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        completed += 1;
+      } catch {
+        failed.push(item.name);
+      }
+      onProgress?.(completed, items.length);
     }
-    onProgress?.(completed, items.length);
-  }
+  });
+  if (items.length) await Promise.all(workers);
   return { completed, failed };
 }
 

@@ -1,10 +1,13 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from '@nestjs/common';
+import { AssetContentCache } from './asset-content-cache';
 import { PrismaService } from './prisma.service';
 import { QuotaService } from './quota.service';
 import { StorageService } from './storage.service';
+import { runsBackgroundMaintenance } from './process-role';
 import { trashRetentionFromSetting } from './trash-retention';
 
-type NormalizedImage = { path: string; sizeBytes: bigint; mimeType: string; width: number; height: number };
+type ImageThumbnail = { path: string; sizeBytes: bigint; mimeType: string; width: number; height: number };
+type NormalizedImage = { path: string; sizeBytes: bigint; mimeType: string; width: number; height: number; thumbnail?: ImageThumbnail };
 type NormalizedVideo = { path: string; sizeBytes: bigint; mimeType: string; width: number | null; height: number | null; durationMs: number | null };
 const trashSelect = {
   id: true,
@@ -33,9 +36,15 @@ export class AssetLifecycleService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AssetLifecycleService.name);
   private purgeTimer?: NodeJS.Timeout;
 
-  constructor(private prisma: PrismaService, private storage: StorageService, private quota: QuotaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private storage: StorageService,
+    private quota: QuotaService,
+    @Optional() private contentCache?: AssetContentCache,
+  ) {}
 
   async onModuleInit() {
+    if (!runsBackgroundMaintenance()) return;
     await this.purgeExpired().catch((error) => this.logger.warn(`trash purge failed: ${error instanceof Error ? error.message : 'unknown'}`));
     this.purgeTimer = setInterval(() => void this.purgeExpired().catch((error) => this.logger.warn(`trash purge failed: ${error instanceof Error ? error.message : 'unknown'}`)), TRASH_PURGE_INTERVAL_MS);
     this.purgeTimer.unref();
@@ -56,22 +65,32 @@ export class AssetLifecycleService implements OnModuleInit, OnModuleDestroy {
     originalName?: string;
   }) {
     let contentHash: string | undefined;
-    if (input.role === 'UPLOAD') {
+    if (input.role === 'UPLOAD' || input.role === 'OUTPUT') {
       try {
         contentHash = await this.storage.hashStaged(input.image.path);
-        const duplicate = await this.findDuplicateUpload(input.userId, input.image, contentHash);
-        if (duplicate) {
-          await this.storage.deleteStaged(input.image.path);
-          return duplicate;
+        if (input.role === 'UPLOAD') {
+          const duplicate = await this.findDuplicateUpload(input.userId, input.image, contentHash);
+          if (duplicate) {
+            await Promise.all([
+              this.storage.deleteStaged(input.image.path),
+              input.image.thumbnail ? this.storage.deleteStaged(input.image.thumbnail.path) : Promise.resolve(),
+            ]);
+            return duplicate;
+          }
         }
       } catch (error) {
-        await this.storage.deleteStaged(input.image.path).catch(() => undefined);
+        await Promise.all([
+          this.storage.deleteStaged(input.image.path).catch(() => undefined),
+          input.image.thumbnail ? this.storage.deleteStaged(input.image.thumbnail.path).catch(() => undefined) : Promise.resolve(),
+        ]);
         throw error;
       }
     }
-    let thumbnail: Awaited<ReturnType<StorageService['createThumbnailFile']>> | undefined;
-    try { thumbnail = input.role === 'MASK' ? undefined : await this.storage.createThumbnailFile(input.image.path); }
+    if (input.role === 'MASK' && input.image.thumbnail) await this.storage.deleteStaged(input.image.thumbnail.path).catch(() => undefined);
+    let thumbnail: ImageThumbnail | undefined = input.role === 'MASK' ? undefined : input.image.thumbnail;
+    try { if (!thumbnail && input.role !== 'MASK') thumbnail = await this.storage.createThumbnailFile(input.image.path); }
     catch (error) { await this.storage.deleteStaged(input.image.path).catch(() => undefined); throw error; }
+    const thumbnailHash = thumbnail ? await this.storage.hashStaged(thumbnail.path).catch(() => undefined) : undefined;
     try { await this.quota.reserveStorage(input.userId, input.image.sizeBytes); }
     catch (error) {
       await Promise.all([this.storage.deleteStaged(input.image.path), thumbnail ? this.storage.deleteStaged(thumbnail.path) : Promise.resolve()]);
@@ -106,6 +125,7 @@ export class AssetLifecycleService implements OnModuleInit, OnModuleDestroy {
           sizeBytes: storedThumbnail.sizeBytes,
           width: thumbnail.width,
           height: thumbnail.height,
+          contentHash: thumbnailHash,
           thumbnailForId: asset.id,
         }}) : null;
         return { ...asset, thumbnail: thumbnailAsset ? { id: thumbnailAsset.id, deletedAt: thumbnailAsset.deletedAt } : null };
@@ -177,6 +197,8 @@ export class AssetLifecycleService implements OnModuleInit, OnModuleDestroy {
     let thumbnail: Awaited<ReturnType<StorageService['createThumbnailFile']>> | undefined;
     try { thumbnail = await this.storage.createVideoThumbnailFile(input.video.path); }
     catch { thumbnail = undefined; }
+    const contentHash = await this.storage.hashStaged(input.video.path).catch(() => undefined);
+    const thumbnailHash = thumbnail ? await this.storage.hashStaged(thumbnail.path).catch(() => undefined) : undefined;
     try { await this.quota.reserveStorage(input.userId, input.video.sizeBytes); }
     catch (error) {
       await Promise.all([thumbnail ? this.storage.deleteStaged(thumbnail.path) : Promise.resolve()]);
@@ -200,6 +222,7 @@ export class AssetLifecycleService implements OnModuleInit, OnModuleDestroy {
           height: input.video.height,
           durationMs: input.video.durationMs,
           originalName: input.originalName,
+          contentHash,
         }});
         const thumbnailAsset = storedThumbnail && thumbnail ? await tx.asset.create({ data: {
           userId: input.userId,
@@ -211,6 +234,7 @@ export class AssetLifecycleService implements OnModuleInit, OnModuleDestroy {
           sizeBytes: storedThumbnail.sizeBytes,
           width: thumbnail.width,
           height: thumbnail.height,
+          contentHash: thumbnailHash,
           thumbnailForId: asset.id,
         }}) : null;
         return { ...asset, thumbnail: thumbnailAsset ? { id: thumbnailAsset.id, deletedAt: thumbnailAsset.deletedAt } : null };
@@ -239,6 +263,7 @@ export class AssetLifecycleService implements OnModuleInit, OnModuleDestroy {
       this.prisma.asset.update({ where: { id: asset.id }, data }),
       ...(asset.thumbnail ? [this.prisma.asset.update({ where: { id: asset.thumbnail.id }, data })] : []),
     ]);
+    await this.forgetContent([asset.id, asset.thumbnail?.id]);
     return asset;
   }
 
@@ -253,6 +278,7 @@ export class AssetLifecycleService implements OnModuleInit, OnModuleDestroy {
       this.prisma.asset.update({ where: { id: asset.id }, data }),
       ...(asset.thumbnail ? [this.prisma.asset.update({ where: { id: asset.thumbnail.id }, data })] : []),
     ]);
+    await this.forgetContent([asset.id, asset.thumbnail?.id]);
     return asset;
   }
 
@@ -311,15 +337,17 @@ export class AssetLifecycleService implements OnModuleInit, OnModuleDestroy {
     if (!claimed) return false;
     await this.storage.deleteMany([asset.objectKey, ...(asset.thumbnail ? [asset.thumbnail.objectKey] : [])]);
     await this.quota.releaseStorage(asset.userId, asset.sizeBytes);
+    await this.forgetContent([asset.id, asset.thumbnail?.id]);
     return true;
   }
 
   async removeJobOutputs(userId: string, jobId: string) {
-    const assets = await this.prisma.asset.findMany({ where: { jobId, role: { in: ['OUTPUT', 'THUMBNAIL'] } }, select: { objectKey: true, role: true, sizeBytes: true, deletedAt: true, purgedAt: true } });
+    const assets = await this.prisma.asset.findMany({ where: { jobId, role: { in: ['OUTPUT', 'THUMBNAIL'] } }, select: { id: true, objectKey: true, role: true, sizeBytes: true, deletedAt: true, purgedAt: true } });
     await this.storage.deleteMany(assets.map(({ objectKey }) => objectKey));
     await this.prisma.asset.deleteMany({ where: { jobId, role: { in: ['OUTPUT', 'THUMBNAIL'] } } });
     const bytes = assets.filter((asset) => asset.role === 'OUTPUT' && !asset.purgedAt).reduce((sum, asset) => sum + asset.sizeBytes, 0n);
     if (bytes) await this.quota.releaseStorage(userId, bytes);
+    await this.forgetContent(assets.map((asset) => asset.id));
     return bytes;
   }
 
@@ -332,6 +360,11 @@ export class AssetLifecycleService implements OnModuleInit, OnModuleDestroy {
     await this.storage.deleteMany([mask.objectKey]);
     await this.prisma.asset.delete({ where: { id: mask.id } });
     await this.quota.releaseStorage(userId, mask.sizeBytes);
+    await this.forgetContent([mask.id]);
     return true;
+  }
+
+  private forgetContent(ids: Array<string | null | undefined>) {
+    return this.contentCache?.invalidate(ids) ?? Promise.resolve();
   }
 }

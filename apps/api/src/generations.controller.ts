@@ -7,10 +7,10 @@ import { PrismaService } from './prisma.service';
 import { RateLimitService } from './rate-limit.service';
 import { QuotaService } from './quota.service';
 import { securityConfig } from './security-config';
-import { parseBody, safeText, uuidSchema } from './validation';
+import { parseBody, uuidSchema } from './validation';
 import { z } from 'zod';
 import { accessibleModelWhere, canAccessModel } from './model-access';
-import { generationJobSelect, serializeGenerationJob } from './generation-response';
+import { generationJobSelect, readGenerationParameters, serializeGenerationJob } from './generation-response';
 import { AssetLifecycleService } from './asset-lifecycle.service';
 import { GENERATION_QUEUE_OPTIONS, isVideoGenerationMode } from './domain-constants';
 import { GenerationEventsService } from './generation-events.service';
@@ -19,44 +19,26 @@ import { serializeAssetLinks } from './asset-response';
 import { computeImageSize, imageSizeAllowed, tierLabelForSize, type ResolutionTier } from './resolution';
 import { accessibleReferencedAssetWhere, accessibleSourceWhere } from './asset-access';
 import { pointsForGeneration } from './generation-quota';
+import { MAX_PROVIDER_PROMPT, isStylePresetId, providerPromptFor, stylePresetAllowedForMode } from './style-presets';
+import { promptHash } from './prompt-hash';
 
 const generationSchema = z.object({
-  prompt: safeText(8000), modelId: uuidSchema, mode: z.enum(['TEXT_TO_IMAGE', 'IMAGE_EDIT', 'INPAINT', 'TEXT_TO_VIDEO', 'IMAGE_TO_VIDEO', 'FIRST_LAST_FRAME_TO_VIDEO']).optional(),
+  prompt: z.string().max(8000).optional(), modelId: uuidSchema, mode: z.enum(['TEXT_TO_IMAGE', 'IMAGE_EDIT', 'INPAINT', 'TEXT_TO_VIDEO', 'IMAGE_TO_VIDEO', 'FIRST_LAST_FRAME_TO_VIDEO']).optional(),
   size: z.string().max(64).optional(), quality: z.string().max(64).optional(), count: z.number().int().min(1).max(4).optional(),
   durationSeconds: z.number().int().min(1).max(60).optional(),
   sourceAssetIds: z.array(uuidSchema).max(8).optional(), maskAssetId: uuidSchema.nullish(), conversationId: uuidSchema.nullish(),
+  stylePresetId: z.string().max(64).optional(),
 }).strict();
-
-type GenerationParameters = {
-  size?: string;
-  quality?: string;
-  count?: number;
-  durationSeconds?: number;
-  sourceAssetIds?: string[];
-  maskAssetId?: string | null;
-};
 
 const CJK = /[\u3400-\u9fff\uf900-\ufaff]/;
 
-export function conversationTitleFromPrompt(prompt: string) {
+export function conversationTitleFromPrompt(prompt: string, styleNameZh?: string) {
   const trimmed = prompt.trim();
+  if (!trimmed) return styleNameZh ? `${styleNameZh}转绘` : '新创作';
   if (CJK.test(trimmed)) return Array.from(trimmed).slice(0, 10).join('');
   const words = trimmed.split(/\s+/).filter(Boolean);
   if (words.length) return words.slice(0, 4).join(' ');
   return Array.from(trimmed).slice(0, 10).join('');
-}
-
-function readGenerationParameters(value: unknown): GenerationParameters {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
-  const candidate = value as Record<string, unknown>;
-  return {
-    size: typeof candidate.size === 'string' ? candidate.size : undefined,
-    quality: typeof candidate.quality === 'string' ? candidate.quality : undefined,
-    count: typeof candidate.count === 'number' ? candidate.count : undefined,
-    durationSeconds: typeof candidate.durationSeconds === 'number' ? candidate.durationSeconds : undefined,
-    sourceAssetIds: Array.isArray(candidate.sourceAssetIds) && candidate.sourceAssetIds.every((id) => typeof id === 'string') ? candidate.sourceAssetIds : undefined,
-    maskAssetId: typeof candidate.maskAssetId === 'string' || candidate.maskAssetId === null ? candidate.maskAssetId : undefined,
-  };
 }
 
 @Controller('generations')
@@ -76,14 +58,20 @@ export class GenerationsController {
   async create(@CurrentUser() user: AuthUser, @Body() raw: unknown) {
     const body = parseBody(generationSchema, raw);
     await this.limits.consume('generation-user', user.id, securityConfig.generationLimit(), 600);
-    const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
-    if (!prompt || prompt.length > 8000) throw new BadRequestException('提示词长度必须为 1-8000 字符');
+    const prompt = body.prompt?.trim() ?? '';
+    const requestedStylePresetId = body.stylePresetId?.trim() ?? '';
+    if (requestedStylePresetId && !isStylePresetId(requestedStylePresetId)) throw new BadRequestException('风格预设无效');
+    const stylePreset = requestedStylePresetId ? await this.prisma.stylePreset.findUnique({ where: { id: requestedStylePresetId } }) : null;
+    if (requestedStylePresetId && !stylePreset) throw new BadRequestException('风格预设无效');
+    const stylePresetId = stylePreset?.id;
     const model = await this.prisma.model.findFirst({ where: { id: body.modelId, enabled: true, provider: { enabled: true, archivedAt: null }, ...accessibleModelWhere(user) }, include: { provider: { select: { name: true } } } });
     if (!model) throw new BadRequestException('模型不可用');
     const videoModel = model.mediaKind === 'VIDEO';
     const mode = body.mode ?? (videoModel ? 'TEXT_TO_VIDEO' : 'TEXT_TO_IMAGE');
     if (videoModel !== isVideoGenerationMode(mode)) throw new BadRequestException('生成模式与模型类型不匹配');
-    if (!videoModel && !['TEXT_TO_IMAGE', 'IMAGE_EDIT', 'INPAINT'].includes(mode)) throw new BadRequestException('生成模式无效');
+    if (stylePresetId && !stylePresetAllowedForMode(mode)) throw new BadRequestException('当前模式不支持风格预设');
+    if (!prompt && !(mode === 'IMAGE_EDIT' && stylePresetId)) throw new BadRequestException('提示词长度必须为 1-8000 字符');
+    if (providerPromptFor(mode, prompt, stylePreset).length > MAX_PROVIDER_PROMPT) throw new BadRequestException('加上风格后提示词超过 8000 字符，请缩短原文');
     if (mode === 'TEXT_TO_IMAGE' && !model.supportsGeneration) throw new BadRequestException('模型不支持文生图');
     if (mode === 'IMAGE_EDIT' && !model.supportsEdit) throw new BadRequestException('模型不支持图片编辑');
     if (mode === 'INPAINT' && !model.supportsInpaint) throw new BadRequestException('模型不支持局部重绘');
@@ -98,15 +86,14 @@ export class GenerationsController {
     const defaults = readGenerationParameters(model.defaults);
     const size = body.size ?? defaults.size ?? (videoModel ? allowedSizes[0] : computeImageSize(imageTiers[0]?.shortEdge ?? 0, allowedRatios[0] ?? '') ?? '1024x1024');
     const quality = body.quality ?? defaults.quality ?? allowedQualities[0];
-    const count = videoModel ? 1 : Math.min(model.maxImages, Math.max(1, Number(body.count) || 1));
+    const count = videoModel ? 1 : Math.min(model.maxImages, body.count ?? 1);
     const durationSeconds = videoModel ? (body.durationSeconds ?? defaults.durationSeconds ?? allowedDurations[0]) : undefined;
     if (videoModel ? !allowedSizes.includes(size) : !imageSizeAllowed(imageTiers, allowedRatios, size)) throw new BadRequestException(videoModel ? '比例不受该模型支持' : '尺寸或质量不受该模型支持');
     if (allowedQualities.length ? !allowedQualities.includes(quality) : Boolean(body.quality)) throw new BadRequestException(videoModel ? '分辨率不受该模型支持' : '尺寸或质量不受该模型支持');
     if (videoModel && (typeof durationSeconds !== 'number' || !allowedDurations.includes(durationSeconds))) throw new BadRequestException('时长不受该模型支持');
-    const sourceIds = Array.isArray(body.sourceAssetIds)
+    const sourceIds = body.sourceAssetIds
       ? (mode === 'FIRST_LAST_FRAME_TO_VIDEO' ? body.sourceAssetIds : [...new Set(body.sourceAssetIds)])
       : [];
-    if (sourceIds.length > 8) throw new BadRequestException('参考图最多支持 8 张');
     if (mode !== 'FIRST_LAST_FRAME_TO_VIDEO' && sourceIds.length > model.maxInputImages) throw new BadRequestException(`该模型最多支持 ${model.maxInputImages} 张参考图`);
     if ((mode === 'TEXT_TO_IMAGE' || mode === 'TEXT_TO_VIDEO') && sourceIds.length) throw new BadRequestException(mode === 'TEXT_TO_VIDEO' ? '文生视频不支持参考图' : '文生图不支持参考图');
     const assetIds = [...sourceIds, ...(body.maskAssetId ? [body.maskAssetId] : [])];
@@ -122,29 +109,29 @@ export class GenerationsController {
     if (conversationId) {
       if (!await this.prisma.conversation.findFirst({ where: { id: conversationId, userId: user.id } })) throw new NotFoundException('会话不存在');
     }
-    const parameters = { size, quality, count, ...(durationSeconds !== undefined ? { durationSeconds } : {}), sourceAssetIds: sourceIds, maskAssetId: body.maskAssetId ?? null };
-    let job;
-    try {
-      const result = await this.prisma.$transaction(async (transaction) => {
-        const targetConversationId = conversationId ?? (await transaction.conversation.create({ data: { userId: user.id, title: conversationTitleFromPrompt(prompt) } })).id;
-        const promptUsedAt = new Date();
+    const parameters = { size, quality, count, ...(durationSeconds !== undefined ? { durationSeconds } : {}), sourceAssetIds: sourceIds, maskAssetId: body.maskAssetId ?? null, ...(stylePreset ? { stylePresetId: stylePreset.id, styleSuffix: stylePreset.suffix } : {}) };
+    const result = await this.prisma.$transaction(async (transaction) => {
+      const targetConversationId = conversationId ?? (await transaction.conversation.create({ data: { userId: user.id, title: conversationTitleFromPrompt(prompt, stylePreset?.nameZh) } })).id;
+      const promptUsedAt = new Date();
+      if (prompt) {
+        const hash = promptHash(prompt);
         await transaction.promptEntry.upsert({
-          where: { userId_prompt: { userId: user.id, prompt } },
-          create: { userId: user.id, prompt, usageCount: 1, lastUsedAt: promptUsedAt },
+          where: { userId_promptHash: { userId: user.id, promptHash: hash } },
+          create: { userId: user.id, prompt, promptHash: hash, usageCount: 1, lastUsedAt: promptUsedAt },
           update: { usageCount: { increment: 1 }, lastUsedAt: promptUsedAt },
         });
-        const created = await transaction.generationJob.create({ data: {
-          userId: user.id, conversationId: targetConversationId, modelId: model.id, mediaKind: videoModel ? 'VIDEO' : 'IMAGE', mode, prompt, parameters, imageCount: count,
-          modelSnapshot: { displayName: model.displayName, upstreamModelId: model.upstreamModelId, providerName: model.provider.name },
-        }});
-        const points = pointsForGeneration({ mediaKind: videoModel ? 'VIDEO' : 'IMAGE', costPerUnit: model.costPerUnit, count, durationSeconds, size, quality, multiplierKey: videoModel ? undefined : tierLabelForSize(imageTiers, size), pointMultipliers: model.pointMultipliers });
-        await this.quota.reserveJobInTransaction(transaction, user, points, { jobId: created.id, modelId: model.id, kind: 'SUBMIT', imageCount: videoModel ? 0 : count, videoSeconds: videoModel ? durationSeconds : 0 });
-        if (body.maskAssetId) await transaction.asset.updateMany({ where: { id: body.maskAssetId, userId: user.id }, data: { jobId: created.id, role: 'MASK' } });
-        return { created, targetConversationId };
-      });
-      job = result.created;
-      conversationId = result.targetConversationId;
-    } catch (error) { throw error; }
+      }
+      const created = await transaction.generationJob.create({ data: {
+        userId: user.id, conversationId: targetConversationId, modelId: model.id, mediaKind: videoModel ? 'VIDEO' : 'IMAGE', mode, prompt, parameters, imageCount: count,
+        modelSnapshot: { displayName: model.displayName, upstreamModelId: model.upstreamModelId, providerName: model.provider.name },
+      }});
+      const points = pointsForGeneration({ mediaKind: videoModel ? 'VIDEO' : 'IMAGE', costPerUnit: model.costPerUnit, count, durationSeconds, size, quality, multiplierKey: videoModel ? undefined : tierLabelForSize(imageTiers, size), pointMultipliers: model.pointMultipliers });
+      await this.quota.reserveJobInTransaction(transaction, user, points, { jobId: created.id, modelId: model.id, kind: 'SUBMIT', imageCount: videoModel ? 0 : count, videoSeconds: videoModel ? durationSeconds : 0 });
+      if (body.maskAssetId) await transaction.asset.updateMany({ where: { id: body.maskAssetId, userId: user.id }, data: { jobId: created.id, role: 'MASK' } });
+      return { created, targetConversationId };
+    });
+    const job = result.created;
+    conversationId = result.targetConversationId;
     try {
       await this.prisma.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } });
       await (videoModel ? this.videoQueue : this.queue).add('generate', { jobId: job.id }, { jobId: job.id, ...GENERATION_QUEUE_OPTIONS });
@@ -169,8 +156,8 @@ export class GenerationsController {
     const sourceRows = sourceAssetIds.length ? await this.prisma.asset.findMany({
       where: { id: { in: sourceAssetIds }, ...accessibleSourceWhere(user) },
       select: {
-        id: true, userId: true, role: true, width: true, height: true, mimeType: true, sizeBytes: true, note: true, deletedAt: true,
-        thumbnail: { select: { id: true, deletedAt: true } },
+        id: true, userId: true, role: true, width: true, height: true, mimeType: true, sizeBytes: true, note: true, deletedAt: true, contentHash: true,
+        thumbnail: { select: { id: true, deletedAt: true, contentHash: true, width: true, height: true } },
         job: { select: { prompt: true } },
       },
     }) : [];
@@ -204,6 +191,7 @@ export class GenerationsController {
         };
       }),
       requiresMaskRedraw: job.mode === 'INPAINT',
+      stylePresetId: parameters.stylePresetId ?? null,
     };
   }
 

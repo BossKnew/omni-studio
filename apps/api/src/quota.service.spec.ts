@@ -24,6 +24,7 @@ describe('QuotaService atomic job counters', () => {
     const tx = mockTx({
       userGroup: { findMany: jest.fn().mockResolvedValue([{ id: 'intern', name: 'Intern', quotaWindow: '5h', quotaPoints: 5 }]) },
       quotaEvent: {
+        aggregate: jest.fn().mockResolvedValue({ _sum: { points: 5 }, _min: { createdAt: new Date(now - 60_000) } }),
         findMany: jest.fn().mockResolvedValue([{ createdAt: new Date(now - 60_000), points: 5 }]),
         create: jest.fn(),
       },
@@ -41,6 +42,7 @@ describe('QuotaService atomic job counters', () => {
     const tx = mockTx({
       userGroup: { findMany: jest.fn().mockResolvedValue([{ id: 'intern', name: 'Intern', quotaWindow: '1d', quotaPoints: 8 }]) },
       quotaEvent: {
+        aggregate: jest.fn().mockResolvedValue({ _sum: { points: 5 }, _min: { createdAt: new Date(now - 60_000) } }),
         findMany: jest.fn().mockResolvedValue([{ createdAt: new Date(now - 60_000), points: 5 }]),
         create: jest.fn(),
       },
@@ -58,7 +60,8 @@ describe('QuotaService atomic job counters', () => {
     const tx = mockTx({
       userGroup: { findMany: jest.fn().mockResolvedValue([{ id: 'intern', name: 'Intern', quotaWindow: '1d', quotaPoints: 20 }]) },
       quotaEvent: {
-        findMany: jest.fn().mockResolvedValue([{ createdAt: new Date(now - 60_000), points: 5 }]),
+        aggregate: jest.fn().mockResolvedValue({ _sum: { points: 5 }, _min: { createdAt: new Date(now - 60_000) } }),
+        findMany: jest.fn(),
         create: jest.fn().mockResolvedValue({}),
       },
     });
@@ -67,6 +70,27 @@ describe('QuotaService atomic job counters', () => {
     expect(tx.quotaEvent.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ imageCount: 2, videoSeconds: 10, points: 7, kind: 'SUBMIT' }),
     }));
+    expect(tx.quotaEvent.findMany).not.toHaveBeenCalled();
+  });
+
+  it('summarizes usage with window aggregates instead of loading every event', async () => {
+    const now = Date.now();
+    const oldest = new Date(now - 60_000);
+    const prisma: any = {
+      userUsage: { findUnique: jest.fn().mockResolvedValue({ storageBytes: 10n }) },
+      userGroup: { findMany: jest.fn().mockResolvedValue([{ id: 'intern', name: 'Intern', quotaWindow: '1d', quotaPoints: 20 }]) },
+      quotaEvent: {
+        aggregate: jest.fn().mockResolvedValue({ _sum: { points: 7 }, _min: { createdAt: oldest } }),
+        findMany: jest.fn(),
+      },
+      asset: { count: jest.fn().mockResolvedValue(12) },
+    };
+    const service = new QuotaService(prisma, {} as unknown as RedisService);
+    const usage = await service.currentUsage({ id: 'user-1', role: 'USER', groupIds: ['intern'] });
+    expect(usage.libraryAssetCount).toBe(12);
+    expect(usage.policies[0]).toMatchObject({ used: 7, remaining: 13, retryAfterSeconds: 0 });
+    expect(prisma.asset.count).toHaveBeenCalledWith({ where: { userId: 'user-1', deletedAt: null, role: { in: ['UPLOAD', 'OUTPUT'] } } });
+    expect(prisma.quotaEvent.findMany).not.toHaveBeenCalled();
   });
 
   it('releases an SSE quota slot at most once', async () => {

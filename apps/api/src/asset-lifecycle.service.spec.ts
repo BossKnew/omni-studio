@@ -76,6 +76,7 @@ describe('AssetLifecycleService thumbnails', () => {
     }) } };
     const prisma: any = { $transaction: jest.fn((callback: any) => callback(tx)) };
     const storage: any = {
+      hashStaged: jest.fn().mockResolvedValue('output-hash'),
       createThumbnailFile: jest.fn().mockResolvedValue({ path: 'thumb-stage', sizeBytes: 100n, mimeType: 'image/webp', width: 512, height: 256 }),
       saveStaged: jest.fn().mockResolvedValueOnce({ objectKey: 'user/source.png', sizeBytes: 1000n }).mockResolvedValueOnce({ objectKey: 'user/thumb.webp', sizeBytes: 100n }),
       deleteStaged: jest.fn().mockResolvedValue(undefined), delete: jest.fn().mockResolvedValue(undefined),
@@ -86,7 +87,8 @@ describe('AssetLifecycleService thumbnails', () => {
     await service.persistNormalized({ userId: 'user-1', role: 'OUTPUT', jobId: 'job-1', image: { path: 'source-stage', sizeBytes: 1000n, mimeType: 'image/png', width: 1024, height: 512 } });
 
     expect(quota.reserveStorage).toHaveBeenCalledWith('user-1', 1000n);
-    expect(created[1]).toMatchObject({ role: 'THUMBNAIL', thumbnailForId: 'source-1', objectKey: 'user/thumb.webp' });
+    expect(created[0]).toMatchObject({ role: 'OUTPUT', contentHash: 'output-hash' });
+    expect(created[1]).toMatchObject({ role: 'THUMBNAIL', thumbnailForId: 'source-1', objectKey: 'user/thumb.webp', contentHash: 'output-hash' });
   });
 
   it('moves the source and thumbnail to trash without deleting files or releasing quota', async () => {

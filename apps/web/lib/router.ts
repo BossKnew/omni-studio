@@ -23,7 +23,7 @@ function navigate(path: string, replace: boolean) {
 }
 
 export function usePathname() {
-  return useSyncExternalStore(subscribe, snapshot, () => '/');
+  return useSyncExternalStore(subscribe, snapshot, snapshot);
 }
 
 export function useRouter() {

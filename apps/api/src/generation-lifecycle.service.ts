@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ACTIVE_JOB_STATUSES, type TerminalJobStatus } from './domain-constants';
 import { GenerationEventsService } from './generation-events.service';
+import { generationJobSelect, serializeGenerationJob } from './generation-response';
 import { PrismaService } from './prisma.service';
 import { QuotaService } from './quota.service';
 
@@ -41,6 +42,7 @@ export class GenerationLifecycleService {
   }
 
   async publish(userId: string, jobId: string) {
-    await this.events.publish(userId, jobId).catch(() => undefined);
+    const job = await this.prisma.generationJob.findFirst({ where: { id: jobId, userId }, select: generationJobSelect }).catch(() => null);
+    await this.events.publish(userId, job ? serializeGenerationJob(job) : jobId).catch(() => undefined);
   }
 }

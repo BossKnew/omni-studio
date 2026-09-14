@@ -15,6 +15,7 @@ import { GenerationLifecycleService } from './generation-lifecycle.service';
 import { accessibleSourceWhere } from './asset-access';
 import { createVideoAdapter } from './video-adapters';
 import { mapProviderRequestError, type GeneratedMedia, type MediaGenerationRequest } from './provider-adapter';
+import { sourceAssetIdsFromParameters } from './generation-response';
 import type { AuthUser } from './common';
 
 @Processor('video-generation', {
@@ -112,7 +113,7 @@ export class VideoGenerationProcessor extends WorkerHost {
   }
 
   private async buildRequest(job: { id: string; userId: string; mode: string; prompt: string; user: { role: AuthUser['role'] } }, params: Record<string, unknown>, upstreamModelId: string): Promise<MediaGenerationRequest> {
-    const sourceIds = Array.isArray(params.sourceAssetIds) ? params.sourceAssetIds.filter((id): id is string => typeof id === 'string') : [];
+    const sourceIds = sourceAssetIdsFromParameters(params);
     const reader = job.user.role === 'ADMIN'
       ? { id: job.userId, role: job.user.role, teamIds: [] as string[] }
       : { id: job.userId, role: job.user.role, teamIds: (await this.prisma.workTeamMembership.findMany({ where: { userId: job.userId }, select: { teamId: true } })).map(({ teamId }) => teamId) };
@@ -142,9 +143,9 @@ export class VideoGenerationProcessor extends WorkerHost {
     for await (const chunk of this.storage.createReadStream(objectKey)) {
       total += chunk.length;
       if (total > MAX_IMAGE_BYTES) throw Object.assign(new Error('参考图超过大小限制'), { noRetry: true });
-      chunks.push(Buffer.from(chunk));
+      chunks.push(chunk);
     }
-    return new Uint8Array(Buffer.concat(chunks));
+    return Buffer.concat(chunks);
   }
 
   private async persistOutput(userId: string, jobId: string, output: GeneratedMedia) {

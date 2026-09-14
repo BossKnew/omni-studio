@@ -8,9 +8,9 @@ OmniStudio 是一个面向团队的自托管图片与视频生成工作台：文
 
 - **生成**：文生图、参考图编辑、蒙版局部重绘、文生视频、图生视频、首尾帧。图生视频和首尾帧由管理员按模型开关。每个模型可配分辨率档位、比例、时长、质量、积分单价，以及按档位的倍率。
 - **供应商**：供应商只保存账号凭证和 Base URL。添加模型时再选图片或视频，以及适配器：图片为 OpenAI Images、Qwen/Wan、Nano Banana、Seedream、Midjourney、Flux、Runway；视频为 Sora、Seedance、Wan/HappyHorse、Veo、MiniMax、Runway、Flux。兼容 OpenAI Videos 协议的网关可直接复用。同一 Google AI Studio 密钥可同时挂 Nano Banana 和 Veo；同一火山方舟密钥可同时挂 Seedream 和 Seedance；同一 BFL 密钥可同时挂 Flux 生图和生视频；同一 Runway 密钥可同时挂 Runway 生图和生视频。Midjourney 走兼容 midjourney-proxy 的网关（官方无公开 API）。
-- **工作台**：图片/视频切换，会话、重新生成、重试、播放、下载（当前会话或素材库所选）、参考图、首尾帧槽位、遮罩绘制、Prompt 历史与收藏、提示词润色。
+- **工作台**：图片/视频切换，会话、重新生成、重试、播放、下载（当前会话或素材库所选）、参考图、首尾帧槽位、遮罩绘制、风格预设、Prompt 历史与收藏、提示词润色。
 - **素材**：会话、素材库（可按类型、来源、模型、日期、备注/提示词筛选）、工作团队分享、回收站（可恢复）、缩略图、存储配额。删除的文件在到期永久清除前仍计入存储。
-- **管理**：用户审批、注册与会话设置、用户组（模型权限 + 每人滑动窗口积分额度）、工作团队（只用于分享）、用量台账、供应商与模型、尺寸/比例/质量/时长的显示文案、提示词润色供应商、回收站留存（默认 30 天）。
+- **管理**：用户审批、注册与会话设置、用户组（模型权限 + 每人滑动窗口积分额度）、工作团队（只用于分享）、用量台账、供应商与模型、尺寸/比例/质量/时长的显示文案、风格预设（样张与提示词）、提示词润色供应商、回收站留存（默认 30 天）、上传图片最长边（默认 4096）。
 - **提示词润色**：支持文生图、图片编辑、文生视频。可配置多家供应商，同一时间只能启用一家。
 - **安全**：管理员强制 MFA、API Key 与 MFA 密钥加密存储、SSRF 防护、速率限制、CSRF 防护
 - **界面**：中文、英文
@@ -48,7 +48,7 @@ docker compose up -d --build
 - 使用 HTTPS：设置 `APP_ORIGINS` 为准确的 Origin，并设 `ALLOW_INSECURE_HTTP=false`
 - 使用独立的高强度数据库、Redis、加密密钥与管理员密码
 - 定期备份 PostgreSQL 数据与媒体卷
-- 可选叠加：Traefik（`compose.traefik.yml`）、外部数据库/Redis（`compose.external.yml`）、Compose secrets（`compose.secrets.yml`）
+- 可选叠加：Traefik（`compose.traefik.yml`）、外部数据库/Redis（`compose.external.yml`）、Compose secrets（`compose.secrets.yml`）、拆分 HTTP/Worker（`compose.worker.yml`）
 - 反向代理示例见 [`deploy`](deploy) 目录
 
 ## 🛠️ 本地开发

@@ -1,28 +1,24 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, memo, useEffect, useMemo, useState } from 'react';
 import { api, json } from '@/lib/api';
 import GenerationSettings from '@/components/GenerationSettings';
 import MaskCanvas from '@/components/MaskCanvas';
 import PromptHistory from '@/components/PromptHistory';
+import StylePresetPicker from '@/components/StylePresetPicker';
 import { buildResolutionMatrix, firstImageSize, parseSize, type ResolutionTier } from '@/lib/resolution-options';
+import { stylePresetById, stylePresetLabel, type StylePreset } from '@/lib/style-presets';
 import { assignFrameRoles, firstLastReferences, isVideoGenerationMode, sameReferenceSelection, type Asset, type FrameRole, type GenerationCreated, type GenerationMode, type GenerationReuse, type MediaKind, type ReferenceSelection, type StudioModel } from '@/lib/studio-types';
 import Icon from '@/components/Icon';
 import Toast, { useToast } from '@/components/Toast';
 import type { OptionLabelMap } from '@/lib/option-labels';
 import { useI18n } from '@/lib/i18n';
 
-const DEFAULT_POINT_MULTIPLIER = 1;
-const MAX_POINT_MULTIPLIER = 100;
-
 function pointMultiplier(multipliers: Record<string, number> | null | undefined, key: string | undefined): number {
-  if (!key) return DEFAULT_POINT_MULTIPLIER;
-  const value = multipliers?.[key];
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > MAX_POINT_MULTIPLIER) return DEFAULT_POINT_MULTIPLIER;
-  return value;
+  if (!key) return 1;
+  return multipliers?.[key] ?? 1;
 }
 
 /** 与 API tierLabelForSize 一致：按短边匹配分辨率档位。 */
-function tierLabelForSize(tiers: ResolutionTier[] | undefined, size: string): string | undefined {
-  if (!tiers?.length) return undefined;
+function tierLabelForSize(tiers: ResolutionTier[], size: string): string | undefined {
   const parsed = parseSize(size);
   if (!parsed) return undefined;
   const shortEdge = Math.min(parsed.width, parsed.height);
@@ -40,10 +36,12 @@ type StudioComposerProps = {
   onCreated: (result: GenerationCreated) => Promise<void>;
 };
 
-export default function StudioComposer({ models, optionLabels = {}, conversationId, references, onReferencesChange, reusePreset, onReuseConsumed, onCreated }: StudioComposerProps) {
-  const { t } = useI18n();
+function StudioComposer({ models, optionLabels = {}, conversationId, references, onReferencesChange, reusePreset, onReuseConsumed, onCreated }: StudioComposerProps) {
+  const { t, locale } = useI18n();
   const { toast, showToast } = useToast();
   const [prompt, setPrompt] = useState('');
+  const [stylePresetId, setStylePresetId] = useState('');
+  const [stylePresets, setStylePresets] = useState<StylePreset[]>([]);
   const [modelId, setModelId] = useState('');
   const [mode, setMode] = useState<GenerationMode>('TEXT_TO_IMAGE');
   const [mediaKind, setMediaKind] = useState<MediaKind>('IMAGE');
@@ -57,7 +55,7 @@ export default function StudioComposer({ models, optionLabels = {}, conversation
   const [polishBusy, setPolishBusy] = useState(false);
   const [polishPreview, setPolishPreview] = useState<{ sourcePrompt: string; polishedPrompt: string } | null>(null);
   const [error, setError] = useState('');
-  const visibleModels = useMemo(() => models.filter((item) => (item.mediaKind ?? 'IMAGE') === mediaKind), [models, mediaKind]);
+  const visibleModels = useMemo(() => models.filter((item) => item.mediaKind === mediaKind), [models, mediaKind]);
   const model = useMemo(() => visibleModels.find((item) => item.id === modelId), [visibleModels, modelId]);
   const video = mediaKind === 'VIDEO';
   const hasSource = references.length > 0;
@@ -72,12 +70,26 @@ export default function StudioComposer({ models, optionLabels = {}, conversation
   }, [visibleModels, model]);
 
   useEffect(() => {
+    let cancelled = false;
+    api<{ items: StylePreset[] }>('/style-presets')
+      .then((result) => { if (!cancelled) setStylePresets(result.items); })
+      .catch(() => { if (!cancelled) setStylePresets([]); });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!stylePresetId || !stylePresets.length) return;
+    if (!stylePresetById(stylePresets, stylePresetId)) setStylePresetId('');
+  }, [stylePresetId, stylePresets]);
+
+  useEffect(() => {
     if (!reusePreset) return;
     const targetModel = reusePreset.modelId ? models.find((item) => item.id === reusePreset.modelId) : undefined;
     const warnings: string[] = [];
     const nextKind: MediaKind = isVideoGenerationMode(reusePreset.mode) ? 'VIDEO' : 'IMAGE';
     setMediaKind(nextKind);
     setPrompt(reusePreset.prompt);
+    setStylePresetId(reusePreset.stylePresetId ?? '');
     setMode(reusePreset.mode);
     onReferencesChange(reusePreset.sourceAssets.map((asset) => ({ key: 'reuse-' + asset.id, kind: 'asset', asset })));
     setMaskFile(null);
@@ -85,13 +97,13 @@ export default function StudioComposer({ models, optionLabels = {}, conversation
 
     if (targetModel) {
       setModelId(targetModel.id);
-      const videoModel = (targetModel.mediaKind ?? 'IMAGE') === 'VIDEO';
-      const imageSizeOk = reusePreset.size && buildResolutionMatrix(targetModel.resolutionTiers ?? [], targetModel.allowedRatios ?? [])?.partsOf(reusePreset.size) != null;
+      const videoModel = targetModel.mediaKind === 'VIDEO';
+      const imageSizeOk = reusePreset.size && buildResolutionMatrix(targetModel.resolutionTiers, targetModel.allowedRatios)?.partsOf(reusePreset.size) != null;
       const nextSize = reusePreset.size && (videoModel ? targetModel.allowedSizes.includes(reusePreset.size) : imageSizeOk)
         ? reusePreset.size
-        : (targetModel.defaults.size ?? (videoModel ? targetModel.allowedSizes[0] : firstImageSize(targetModel.resolutionTiers ?? [], targetModel.allowedRatios ?? [])));
+        : (targetModel.defaults.size ?? (videoModel ? targetModel.allowedSizes[0] : firstImageSize(targetModel.resolutionTiers, targetModel.allowedRatios)));
       const nextQuality = reusePreset.quality && targetModel.allowedQualities.includes(reusePreset.quality) ? reusePreset.quality : targetModel.defaults.quality ?? targetModel.allowedQualities[0];
-      const durations = targetModel.allowedDurations ?? [];
+      const durations = targetModel.allowedDurations;
       const nextDuration = reusePreset.durationSeconds && durations.includes(reusePreset.durationSeconds) ? reusePreset.durationSeconds : targetModel.defaults.durationSeconds ?? durations[0] ?? 5;
       setSize(nextSize);
       setQuality(nextQuality);
@@ -130,13 +142,13 @@ export default function StudioComposer({ models, optionLabels = {}, conversation
 
   function chooseModel(item: StudioModel) {
     setModelId(item.id);
-    const videoModel = (item.mediaKind ?? 'IMAGE') === 'VIDEO';
-    setSize(item.defaults.size ?? (videoModel ? item.allowedSizes[0] : firstImageSize(item.resolutionTiers ?? [], item.allowedRatios ?? [])));
+    const videoModel = item.mediaKind === 'VIDEO';
+    setSize(item.defaults.size ?? (videoModel ? item.allowedSizes[0] : firstImageSize(item.resolutionTiers, item.allowedRatios)));
     setQuality(item.defaults.quality ?? item.allowedQualities[0] ?? '');
-    setDuration(item.defaults.durationSeconds ?? item.allowedDurations?.[0] ?? 5);
+    setDuration(item.defaults.durationSeconds ?? item.allowedDurations[0] ?? 5);
     setCount(item.defaults.count ?? 1);
     setMode((current) => {
-      if ((item.mediaKind ?? 'IMAGE') === 'VIDEO') {
+      if (item.mediaKind === 'VIDEO') {
         if (current === 'FIRST_LAST_FRAME_TO_VIDEO' && item.supportsFirstLastFrame) return current;
         if (current === 'IMAGE_TO_VIDEO' && item.supportsEdit) return current;
         if (current === 'FIRST_LAST_FRAME_TO_VIDEO' && item.supportsEdit) return 'IMAGE_TO_VIDEO';
@@ -149,6 +161,7 @@ export default function StudioComposer({ models, optionLabels = {}, conversation
 
   function resetComposer() {
     setPrompt('');
+    setStylePresetId('');
     setPolishPreview(null);
     setMode(video ? 'TEXT_TO_VIDEO' : 'TEXT_TO_IMAGE');
     onReferencesChange([]);
@@ -156,9 +169,9 @@ export default function StudioComposer({ models, optionLabels = {}, conversation
     setSourceInputKey((current) => current + 1);
     setError('');
     if (model) {
-      setSize(model.defaults.size ?? ((model.mediaKind ?? 'IMAGE') === 'VIDEO' ? model.allowedSizes[0] : firstImageSize(model.resolutionTiers ?? [], model.allowedRatios ?? [])));
+      setSize(model.defaults.size ?? (model.mediaKind === 'VIDEO' ? model.allowedSizes[0] : firstImageSize(model.resolutionTiers, model.allowedRatios)));
       setQuality(model.defaults.quality ?? model.allowedQualities[0]);
-      setDuration(model.defaults.durationSeconds ?? model.allowedDurations?.[0] ?? 5);
+      setDuration(model.defaults.durationSeconds ?? model.allowedDurations[0] ?? 5);
       setCount(model.defaults.count ?? 1);
     }
   }
@@ -267,6 +280,7 @@ export default function StudioComposer({ models, optionLabels = {}, conversation
         ...(video ? { durationSeconds: duration } : {}),
         sourceAssetIds,
         maskAssetId: uploadedMask?.id,
+        ...(!video && (mode === 'TEXT_TO_IMAGE' || mode === 'IMAGE_EDIT') && stylePresetId ? { stylePresetId } : {}),
       }));
       resetComposer();
       await onCreated(result);
@@ -310,7 +324,7 @@ export default function StudioComposer({ models, optionLabels = {}, conversation
     setMaskFile(null);
   }
 
-  const maskSource = primaryReference?.kind === 'asset' ? primaryReference.asset.contentUrl : primaryReference?.file;
+  const maskSource = primaryReference?.kind === 'asset' ? (primaryReference.asset.thumbnailUrl ?? primaryReference.asset.contentUrl) : primaryReference?.file;
   const estimatedPoints = useMemo(() => {
     if (!model) return 0;
     if (video) {
@@ -320,6 +334,10 @@ export default function StudioComposer({ models, optionLabels = {}, conversation
     const multiplier = pointMultiplier(model.pointMultipliers, tierLabelForSize(model.resolutionTiers, size));
     return Math.ceil(model.costPerUnit * count * multiplier);
   }, [model, video, quality, duration, size, count]);
+  const stylePickerVisible = !video && (mode === 'TEXT_TO_IMAGE' || mode === 'IMAGE_EDIT');
+  const restyleOnly = mode === 'IMAGE_EDIT' && Boolean(stylePresetId);
+  const selectedStyle = stylePresetById(stylePresets, stylePresetId);
+  const promptPlaceholder = video ? t('输入视频描述或镜头要求') : restyleOnly ? t('可选：额外的编辑要求，或留空只转风格') : t('输入图片描述或编辑要求');
 
   return <form className={'composer card stack ' + (conversationId ? 'compact-composer' : '')} onSubmit={submit}>
     <Toast toast={toast} />
@@ -330,12 +348,13 @@ export default function StudioComposer({ models, optionLabels = {}, conversation
     </div>
     {video && !visibleModels.length && <p className="muted">{t('还没有可用的视频模型，请联系管理员接入供应商并授权。')}</p>}
     <div className="prompt-input-wrap">
-      <textarea className="field prompt" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={video ? t('输入视频描述或镜头要求') : t('输入图片描述或编辑要求')} required />
+      <textarea className="field prompt" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={promptPlaceholder} required={!restyleOnly} />
       <div className="prompt-input-actions">
         <PromptHistory onPick={(value) => { setPrompt(value); setPolishPreview(null); }} />
-        {(mode === 'TEXT_TO_IMAGE' || mode === 'TEXT_TO_VIDEO' || firstLast || (mode === 'IMAGE_EDIT' && hasSource)) && <button className="button prompt-polish-button" type="button" disabled={polishBusy || busy} onClick={() => void polishPrompt()}>{polishBusy ? t('正在润色…') : t('提示词润色')}</button>}
+        {(mode === 'TEXT_TO_IMAGE' || mode === 'TEXT_TO_VIDEO' || firstLast || (mode === 'IMAGE_EDIT' && hasSource)) && <button className="button prompt-polish-button" type="button" disabled={polishBusy || busy || !prompt.trim()} onClick={() => void polishPrompt()}>{polishBusy ? t('正在润色…') : t('提示词润色')}</button>}
       </div>
     </div>
+    {stylePickerVisible && <StylePresetPicker value={stylePresetId} items={stylePresets} onChange={setStylePresetId} />}
     {polishPreview && <section className="prompt-polish-preview" aria-live="polite">
       <div className="prompt-polish-preview-block"><span className="prompt-polish-preview-label">{t('原提示词')}</span><p>{polishPreview.sourcePrompt}</p></div>
       <div className="prompt-polish-preview-block"><span className="prompt-polish-preview-label">{t('润色结果')}</span><p>{polishPreview.polishedPrompt}</p></div>
@@ -348,7 +367,7 @@ export default function StudioComposer({ models, optionLabels = {}, conversation
     </div>}
     {!firstLast && hasSource && <div className="source-selection-list" aria-label={t('参考图列表')}>
       {references.map((reference, index) => <div className="source-selection" key={reference.key}>
-        {reference.kind === 'asset' ? <img src={reference.asset.thumbnailUrl ?? reference.asset.contentUrl} alt={t('已选参考图')} /> : <Icon className="source-file-icon" name="image" />}
+        {reference.kind === 'asset' && reference.asset.thumbnailUrl ? <img src={reference.asset.thumbnailUrl} width={reference.asset.thumbnailWidth ?? undefined} height={reference.asset.thumbnailHeight ?? undefined} alt={t('已选参考图')} /> : <Icon className="source-file-icon" name="image" />}
         <div className="source-selection-copy"><strong>{index + 1}. {reference.kind === 'asset' ? reference.asset.visibility === 'shared' ? t('组内参考图') : t('已选历史参考图') : reference.file.name}</strong><span className="muted">{reference.kind === 'asset' ? reference.asset.visibility === 'shared' ? t('组内素材') : t('已保存图片') : t('本地图片')}</span></div>
         <button className="icon-button" type="button" onClick={() => removeReference(reference.key)} aria-label={t('移除参考图')} title={t('移除')}><Icon name="close" /></button>
       </div>)}
@@ -391,6 +410,10 @@ export default function StudioComposer({ models, optionLabels = {}, conversation
         onCountChange={setCount}
       />
       <div className="generate-area">
+        {stylePickerVisible && selectedStyle && <button className="style-preset-chip" type="button" onClick={() => setStylePresetId('')} aria-label={t('清除风格')}>
+          {t('风格')}：{stylePresetLabel(selectedStyle, locale)}
+          <Icon name="close" />
+        </button>}
         {model && <span className="generate-cost">{t('预计消耗')} <strong>{estimatedPoints}</strong>{t('积分')}</span>}
         <button className="button primary generate-button" disabled={busy || !modelId || mode === 'INPAINT' && !maskFile}>{busy ? t('正在提交/生成…') : t('开始生成')}</button>
       </div>
@@ -398,6 +421,8 @@ export default function StudioComposer({ models, optionLabels = {}, conversation
     {error && <p className="error composer-error">{error}</p>}
   </form>;
 }
+
+export default memo(StudioComposer);
 
 function videoSourceHint(model: StudioModel | undefined, t: (key: string) => string) {
   if (model?.supportsEdit && model.supportsFirstLastFrame) return t('请切换到图生视频或首尾帧');
@@ -420,7 +445,9 @@ function FrameSlot({ role, reference, t, onFile, onClear }: {
       {filled && <button className="icon-button" type="button" onClick={onClear} aria-label={role === 'first' ? t('移除首帧') : t('移除尾帧')} title={t('移除')}><Icon name="close" /></button>}
     </div>
     {reference?.kind === 'asset'
-      ? <img className="frame-slot-preview" src={reference.asset.thumbnailUrl ?? reference.asset.contentUrl} alt={label} />
+      ? (reference.asset.thumbnailUrl
+        ? <img className="frame-slot-preview" src={reference.asset.thumbnailUrl} width={reference.asset.thumbnailWidth ?? undefined} height={reference.asset.thumbnailHeight ?? undefined} alt={label} />
+        : <div className="frame-slot-empty"><span>{t('暂无预览')}</span></div>)
       : <div className="frame-slot-empty">{reference?.kind === 'file' ? <><Icon className="source-file-icon" name="image" /><span>{reference.file.name}</span></> : t('尚未选择')}</div>}
     <label className="source-upload">{filled ? t('更换图片') : (role === 'first' ? t('添加首帧') : t('添加尾帧'))}
       <input className="field" type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => { const file = event.target.files?.[0]; if (file) onFile(file); event.currentTarget.value = ''; }} />

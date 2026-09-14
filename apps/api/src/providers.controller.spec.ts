@@ -1,6 +1,17 @@
 import { HttpException } from '@nestjs/common';
 import { ProvidersController } from './providers.controller';
 
+function fetchHttp() {
+  return {
+    validateBaseUrl: (value: unknown) => String(value).replace(/\/$/, ''),
+    request: async (url: string, init: any) => {
+      const response = await fetch(url, init);
+      const body = typeof (response as any).arrayBuffer === 'function' ? Buffer.from(await response.arrayBuffer()) : Buffer.from('{"data":[]}');
+      return { ok: response.ok, status: response.status, headers: response.headers ?? new Headers({ 'content-type': 'application/json' }), body, url };
+    },
+  };
+}
+
 describe('ProvidersController', () => {
   const originalFetch = global.fetch;
   let prisma: any;
@@ -12,7 +23,7 @@ describe('ProvidersController', () => {
       model: { findMany: jest.fn().mockResolvedValue([]) },
       $transaction: jest.fn(),
     };
-    controller = new ProvidersController(prisma, { decrypt: jest.fn(() => 'secret'), encrypt: jest.fn((value) => `encrypted:${value}`) } as any);
+    controller = new ProvidersController(prisma, { decrypt: jest.fn(() => 'secret'), encrypt: jest.fn((value) => `encrypted:${value}`) } as any, fetchHttp() as any);
   });
 
   afterEach(() => { global.fetch = originalFetch; });

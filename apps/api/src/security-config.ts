@@ -1,4 +1,5 @@
 import ipaddr from 'ipaddr.js';
+import { processRole } from './process-role';
 
 export function intEnv(name: string, fallback: number, min = 1, max = Number.MAX_SAFE_INTEGER) {
   const parsed = Number(process.env[name]);
@@ -99,6 +100,7 @@ function validateSecretMaterial() {
 }
 
 export function validateSecurityConfig() {
+  processRole();
   validateSecretMaterial();
   const mediaAcceleration = process.env.MEDIA_X_ACCEL_REDIRECT || 'false';
   if (!['true', 'false'].includes(mediaAcceleration)) throw new Error('MEDIA_X_ACCEL_REDIRECT must be true or false');

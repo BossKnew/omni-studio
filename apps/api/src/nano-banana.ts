@@ -9,6 +9,7 @@
  */
 import { MAX_ERROR_BYTES } from './safe-http.service';
 import type { VideoAdapterDeps } from './provider-adapter';
+import { gcd } from './resolution';
 
 type Json = Record<string, unknown>;
 
@@ -28,17 +29,6 @@ export function bananaHeaders(headers: Record<string, string>, extra?: Record<st
     result['x-goog-api-key'] = key;
   }
   return result;
-}
-
-function gcd(a: number, b: number) {
-  let x = Math.abs(a);
-  let y = Math.abs(b);
-  while (y) {
-    const next = x % y;
-    x = y;
-    y = next;
-  }
-  return x || 1;
 }
 
 /** Maps a stored WxH size (or an already-canonical ratio) to Gemini aspectRatio. */

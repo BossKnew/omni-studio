@@ -1,6 +1,6 @@
 {
   "name": "@omnistudio/api",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "OmniStudio API and background worker.",
   "license": "MIT",
@@ -33,11 +33,11 @@
     "dotenv": "^17.4.2",
     "ioredis": "^6.0.0",
     "ipaddr.js": "^2.5.0",
-    "multer": "^2.2.0",
+    "multer": "^2.4.0",
     "qrcode": "^1.5.4",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
-    "sharp": "^0.35.3",
+    "sharp": "^0.35.4",
     "stream-json": "^3.5.0",
     "undici": "^8.10.0",
     "zod": "^4.4.3"

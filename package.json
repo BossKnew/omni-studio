@@ -1,6 +1,6 @@
 {
   "name": "omnistudio",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Self-hosted image and video generation workspace with a secure Docker Compose deployment.",
   "author": "BossKnew",
@@ -22,7 +22,11 @@
   },
   "engines": { "node": ">=24 <25" },
   "overrides": {
-    "deepmerge-ts": "8.0.1"
+    "deepmerge-ts": "8.0.1",
+    "fast-uri": "3.1.7",
+    "js-yaml": "3.15.2",
+    "multer": "2.4.0",
+    "mysql2": "3.24.4"
   },
   "allowScripts": {
     "@prisma/engines": true,

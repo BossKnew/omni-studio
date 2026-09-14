@@ -18,13 +18,14 @@ export class GenerationEventsService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleInit() {
     this.subscriber = this.redis.client.duplicate({ enableOfflineQueue: false, maxRetriesPerRequest: 1, lazyConnect: true });
-    this.subscriber.on('message', (channel, jobId) => void this.deliver(channel, jobId));
+    this.subscriber.on('message', (channel, payload) => void this.deliver(channel, payload));
     this.subscriber.on('error', (error) => this.logger.warn(`generation event subscriber error: ${error.message}`));
     await this.subscriber.connect();
   }
 
-  async publish(userId: string, jobId: string) {
-    await this.redis.client.publish(this.channel(userId), jobId);
+  async publish(userId: string, job: GenerationEvent | string) {
+    const payload = typeof job === 'string' ? job : JSON.stringify({ v: 1, job });
+    await this.redis.client.publish(this.channel(userId), payload);
   }
 
   async subscribe(userId: string, listener: Listener) {
@@ -68,13 +69,13 @@ export class GenerationEventsService implements OnModuleInit, OnModuleDestroy {
     else this.subscriber.disconnect();
   }
 
-  private async deliver(channel: string, jobId: string) {
-    const userId = channel.slice('generation-events:v1:'.length);
+  private async deliver(channel: string, payload: string) {
+    const userId = channel.slice('generation-events:v2:'.length);
     if (!this.listeners.get(userId)?.size) return;
     try {
-      const job = await this.prisma.generationJob.findFirst({ where: { id: jobId, userId }, select: generationJobSelect });
-      if (!job) return;
-      const event = serializeGenerationJob(job);
+      const parsed = eventFromPayload(payload);
+      const event = parsed.job ?? await this.loadJob(userId, parsed.jobId);
+      if (!event) return;
       for (const listener of this.listeners.get(userId) ?? []) {
         try { listener(event); }
         catch (error) { this.logger.warn(`local generation event listener failed: ${error instanceof Error ? error.message : 'unknown'}`); }
@@ -84,5 +85,26 @@ export class GenerationEventsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private channel(userId: string) { return `generation-events:v1:${userId}`; }
+  private async loadJob(userId: string, jobId?: string) {
+    if (!jobId) return null;
+    const job = await this.prisma.generationJob.findFirst({ where: { id: jobId, userId }, select: generationJobSelect });
+    return job ? serializeGenerationJob(job) : null;
+  }
+
+  private channel(userId: string) { return `generation-events:v2:${userId}`; }
+}
+
+function eventFromPayload(raw: string): { job?: GenerationEvent; jobId?: string } {
+  if (raw.startsWith('{')) {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const candidate = parsed as { v?: unknown; job?: GenerationEvent };
+        if (candidate.v === 1 && candidate.job && typeof candidate.job.id === 'string' && typeof candidate.job.status === 'string') {
+          return { job: candidate.job };
+        }
+      }
+    } catch { /* Fall back to treating the payload as a job id. */ }
+  }
+  return raw ? { jobId: raw } : {};
 }

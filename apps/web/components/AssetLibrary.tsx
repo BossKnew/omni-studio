@@ -18,13 +18,11 @@ type AssetLibraryProps = {
   onAssetNoteSaved: (id: string, note: string | null) => void;
   onAssetDeleted: (asset: Asset) => void;
   onAssetRestored: (asset: Asset) => void;
-  onAssetSharesSaved: (id: string, teamIds: string[]) => void;
-  onAssetUnshared: (id: string, teamId: string) => void;
   isAdmin: boolean;
 };
 
 export default function AssetLibrary({
-  models, libraryEpoch, onStartCreation, onOpenAsset, onUseAsReference, onAssetNoteSaved, onAssetDeleted, onAssetRestored, onAssetSharesSaved, onAssetUnshared, isAdmin,
+  models, libraryEpoch, onStartCreation, onOpenAsset, onUseAsReference, onAssetNoteSaved, onAssetDeleted, onAssetRestored, isAdmin,
 }: AssetLibraryProps) {
   const { t, locale } = useI18n();
   const { toast, showToast } = useToast();
@@ -72,7 +70,7 @@ export default function AssetLibrary({
   const visibleFilters = { ...filters, q: tab === 'shared' ? '' : filters.q };
   const filtering = hasActiveAssetFilters(visibleFilters);
   const filterCount = activeAssetFilterCount(visibleFilters);
-  const modelOptions = models.filter((model) => filters.mediaKind === 'ALL' || (model.mediaKind ?? 'IMAGE') === filters.mediaKind);
+  const modelOptions = models.filter((model) => filters.mediaKind === 'ALL' || model.mediaKind === filters.mediaKind);
 
   useEffect(() => {
     setSelectedIds(new Set());
@@ -167,15 +165,18 @@ export default function AssetLibrary({
       if (snapshot.tab === 'mine') {
         setMineAssets((current) => reset ? page.items : [...current, ...page.items]);
         setMineCursor(page.nextCursor);
-        setMineTotal(page.total ?? page.items.length);
+        if (reset) setMineTotal(page.total ?? page.items.length);
+        else if (typeof page.total === 'number') setMineTotal(page.total);
       } else if (snapshot.tab === 'shared') {
         setSharedAssets((current) => reset ? page.items : [...current, ...page.items]);
         setSharedCursor(page.nextCursor);
-        setSharedTotal(page.total ?? page.items.length);
+        if (reset) setSharedTotal(page.total ?? page.items.length);
+        else if (typeof page.total === 'number') setSharedTotal(page.total);
       } else {
         setTrashAssets((current) => reset ? page.items : [...current, ...page.items]);
         setTrashCursor(page.nextCursor);
-        setTrashTotal(page.total ?? page.items.length);
+        if (reset) setTrashTotal(page.total ?? page.items.length);
+        else if (typeof page.total === 'number') setTrashTotal(page.total);
       }
     } catch (caught) {
       if (revision !== loadRevision.current) return;
@@ -195,7 +196,7 @@ export default function AssetLibrary({
       if (key === 'role' && value === 'UPLOAD') next.modelId = '';
       if (key === 'mediaKind' && next.modelId) {
         const selected = models.find((model) => model.id === next.modelId);
-        if (selected && value !== 'ALL' && (selected.mediaKind ?? 'IMAGE') !== value) next.modelId = '';
+        if (selected && value !== 'ALL' && selected.mediaKind !== value) next.modelId = '';
       }
       return next;
     });
@@ -326,7 +327,6 @@ export default function AssetLibrary({
       const result = await api<{ items: Array<{ teamId: string }> }>('/assets/' + sharingAsset.id + '/shares', json('PUT', { teamIds: shareDraft }));
       const teamIds = result.items.map((item) => item.teamId);
       setMineAssets((current) => current.map((item) => item.id === sharingAsset.id ? { ...item, sharedTeamIds: teamIds } : item));
-      onAssetSharesSaved(sharingAsset.id, teamIds);
       setSharingAsset(null);
     } catch (caught) {
       setError(t((caught as Error).message));
@@ -343,7 +343,6 @@ export default function AssetLibrary({
       await api('/assets/' + asset.id + '/shares/' + asset.team.id, json('DELETE'));
       setSharedAssets((current) => current.filter((item) => item.shareId !== asset.shareId));
       setSharedTotal((count) => Math.max(0, count - 1));
-      onAssetUnshared(asset.id, asset.team.id);
     } catch (caught) {
       setError(t((caught as Error).message));
     }
@@ -495,7 +494,9 @@ export default function AssetLibrary({
         </label>
         {tab === 'mine' && Boolean(asset.sharedTeamIds?.length) && <span className="asset-share-badge">{t('已分享')}</span>}
         <button className="image-thumbnail" type="button" onClick={() => onOpenAsset(asset)} aria-label={asset.mediaKind === 'VIDEO' ? t('播放生成视频') : t('放大查看图片')}>
-          <img src={asset.thumbnailUrl ?? asset.contentUrl} loading="lazy" decoding="async" alt={asset.role === 'OUTPUT' ? t('生成资产') : t('上传资产')} />
+          {asset.thumbnailUrl
+            ? <img src={asset.thumbnailUrl} width={asset.thumbnailWidth ?? undefined} height={asset.thumbnailHeight ?? undefined} loading="lazy" decoding="async" alt={asset.role === 'OUTPUT' ? t('生成资产') : t('上传资产')} />
+            : <span className="image-preview-missing">{t('暂无预览')}</span>}
           {asset.mediaKind === 'VIDEO' && <Icon className="video-play-badge" name="play" />}
           <span className="image-expand" aria-hidden="true">{asset.mediaKind === 'VIDEO' ? t('播放') : t('放大')}</span>
         </button>

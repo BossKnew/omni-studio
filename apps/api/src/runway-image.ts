@@ -6,12 +6,16 @@
  * Text-to-image and reference-image editing (referenceImages, up to 3).
  * Mask inpainting has no Runway counterpart and is rejected by the processor.
  */
-import { VIDEO_POLL_INTERVAL_MS } from './domain-constants';
+import { pollDelayMs } from './domain-constants';
 import { MAX_ERROR_BYTES } from './safe-http.service';
 import {
+  jsonObject,
+  parseJsonBody,
   providerProtocolError,
   providerTimeoutError,
   sleep as defaultSleep,
+  text,
+  type JsonObject,
   type VideoAdapterDeps,
 } from './provider-adapter';
 import {
@@ -23,21 +27,7 @@ import {
   testRunwayConnection,
 } from './video-adapters';
 
-type Json = Record<string, unknown>;
-
-function jsonObject(value: unknown): Json | undefined {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as Json : undefined;
-}
-
-function text(value: unknown) {
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-}
-
-function parseJsonBody(body?: Buffer) {
-  if (!body?.length) return undefined;
-  try { return JSON.parse(body.toString('utf8')); }
-  catch { return undefined; }
-}
+type Json = JsonObject;
 
 export const RUNWAY_IMAGE_RATIOS = [
   '1024:1024', '1080:1080', '720:720',
@@ -210,6 +200,7 @@ export async function submitRunwayImage(deps: VideoAdapterDeps, body: unknown) {
 export async function pollRunwayImageTask(deps: VideoAdapterDeps, taskId: string) {
   const deadline = (deps.now ?? Date.now)() + Math.min(Math.max(Number(deps.pollTimeoutSeconds) || 900, 10), 3600) * 1000;
   const url = `${runwayApiRoot(deps.baseUrl)}/v1/tasks/${encodeURIComponent(taskId)}`;
+  let attempt = 0;
   while (true) {
     if ((deps.now ?? Date.now)() >= deadline) throw providerTimeoutError();
     const payload = await runwayGet(deps, url);
@@ -229,7 +220,8 @@ export async function pollRunwayImageTask(deps: VideoAdapterDeps, taskId: string
       };
       throw error;
     }
-    await (deps.sleep ?? defaultSleep)(VIDEO_POLL_INTERVAL_MS, deps.signal);
+    await (deps.sleep ?? defaultSleep)(pollDelayMs(attempt), deps.signal);
+    attempt += 1;
   }
 }
 

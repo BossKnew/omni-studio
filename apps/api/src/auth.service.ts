@@ -62,7 +62,7 @@ export class AuthService implements OnModuleInit {
     return duration.value;
   }
 
-  async register(rawUsername: unknown, rawPassword: unknown, ip = 'unknown') {
+  async register(rawUsername: string, rawPassword: string, ip = 'unknown') {
     await this.limits.consume('register-ip', ip, securityConfig.registrationLimit(), 3600);
     if (!(await this.registrationEnabled())) throw new ForbiddenException('管理员暂未开放注册');
     try {
@@ -76,14 +76,14 @@ export class AuthService implements OnModuleInit {
     }
   }
 
-  async login(rawUsername: unknown, rawPassword: unknown, ip = 'unknown', remember = false) {
+  async login(rawUsername: string, rawPassword: string, ip = 'unknown', remember = false) {
     let username: string;
     try { username = cleanUsername(rawUsername); } catch { throw new UnauthorizedException('用户名或密码错误'); }
     await this.limits.consume('login-ip', ip, securityConfig.loginIpLimit(), 600);
     await this.limits.consume('login-pair', `${ip}\0${username}`, securityConfig.loginPairLimit(), 600);
     await this.limits.assertAvailable('login-account-failure', username, securityConfig.loginAccountFailureLimit());
     const user = await this.prisma.user.findUnique({ where: { username }, include: { mfaCredential: { select: { userId: true } } } });
-    const password = typeof rawPassword === 'string' ? rawPassword : '';
+    const password = rawPassword;
     const valid = await verifyPassword(user?.passwordHash ?? this.dummyHash, password).catch(() => false);
     if (user && valid) await this.limits.clear('login-account-failure', username);
     if (!user || !valid) {

@@ -1,4 +1,33 @@
 import { serializeAssetLinks } from './asset-response';
+import { isStylePresetId } from './style-presets';
+
+export type StoredGenerationParameters = {
+  size?: string;
+  quality?: string;
+  count?: number;
+  durationSeconds?: number;
+  sourceAssetIds?: string[];
+  maskAssetId?: string | null;
+  stylePresetId?: string;
+};
+
+export function readGenerationParameters(value: unknown): StoredGenerationParameters {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const candidate = value as Record<string, unknown>;
+  return {
+    size: typeof candidate.size === 'string' ? candidate.size : undefined,
+    quality: typeof candidate.quality === 'string' ? candidate.quality : undefined,
+    count: typeof candidate.count === 'number' ? candidate.count : undefined,
+    durationSeconds: typeof candidate.durationSeconds === 'number' ? candidate.durationSeconds : undefined,
+    sourceAssetIds: Array.isArray(candidate.sourceAssetIds) ? candidate.sourceAssetIds.filter((id): id is string => typeof id === 'string') : undefined,
+    maskAssetId: typeof candidate.maskAssetId === 'string' || candidate.maskAssetId === null ? candidate.maskAssetId : undefined,
+    stylePresetId: typeof candidate.stylePresetId === 'string' && isStylePresetId(candidate.stylePresetId) ? candidate.stylePresetId : undefined,
+  };
+}
+
+export function sourceAssetIdsFromParameters(value: unknown): string[] {
+  return readGenerationParameters(value).sourceAssetIds ?? [];
+}
 
 type StoredAsset = {
   id: string;
@@ -11,7 +40,8 @@ type StoredAsset = {
   sizeBytes: bigint;
   note?: string | null;
   deletedAt?: Date | null;
-  thumbnail?: { id: string; deletedAt: Date | null } | null;
+  contentHash?: string | null;
+  thumbnail?: { id: string; deletedAt: Date | null; contentHash?: string | null; width?: number | null; height?: number | null } | null;
 };
 
 type StoredJob = {
@@ -49,7 +79,8 @@ export const generationJobSelect = {
       sizeBytes: true,
       note: true,
       deletedAt: true,
-      thumbnail: { select: { id: true, deletedAt: true } },
+      contentHash: true,
+      thumbnail: { select: { id: true, deletedAt: true, contentHash: true, width: true, height: true } },
     },
   },
 } as const;
@@ -62,8 +93,8 @@ function publicParameters(value: unknown) {
   const size = typeof candidate.size === 'string' ? candidate.size : undefined;
   const quality = typeof candidate.quality === 'string' ? candidate.quality : undefined;
   return {
-    ...(Number.isInteger(count) ? { count: Number(count) } : {}),
-    ...(Number.isInteger(durationSeconds) ? { durationSeconds: Number(durationSeconds) } : {}),
+    ...(Number.isInteger(count) ? { count } : {}),
+    ...(Number.isInteger(durationSeconds) ? { durationSeconds } : {}),
     ...(size ? { size } : {}),
     ...(quality ? { quality } : {}),
   };

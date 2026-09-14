@@ -9,7 +9,7 @@ export class TeamsController {
   @Get()
   list(@CurrentUser() user: AuthUser) {
     return this.prisma.workTeam.findMany({
-      where: user.role === 'ADMIN' ? undefined : { id: { in: user.teamIds ?? [] } },
+      where: user.role === 'ADMIN' ? undefined : { id: { in: user.teamIds } },
       orderBy: { name: 'asc' },
       select: { id: true, name: true },
     });

@@ -7,37 +7,22 @@
  * Text-to-image and image-prompt editing (base64Array). Mask inpainting is
  * rejected by the processor.
  */
-import { VIDEO_POLL_INTERVAL_MS } from './domain-constants';
+import { pollDelayMs } from './domain-constants';
 import { MAX_ERROR_BYTES } from './safe-http.service';
 import {
+  bearerToken,
+  jsonObject,
+  parseJsonBody,
   providerProtocolError,
   providerTimeoutError,
   sleep as defaultSleep,
+  text,
+  type JsonObject,
   type VideoAdapterDeps,
 } from './provider-adapter';
+import { gcd } from './resolution';
 
-type Json = Record<string, unknown>;
-
-function jsonObject(value: unknown): Json | undefined {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as Json : undefined;
-}
-
-function text(value: unknown) {
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-}
-
-function parseJsonBody(body?: Buffer) {
-  if (!body?.length) return undefined;
-  try { return JSON.parse(body.toString('utf8')); }
-  catch { return undefined; }
-}
-
-function bearerToken(headers: Record<string, string>) {
-  for (const [name, value] of Object.entries(headers)) {
-    if (name.toLowerCase() === 'authorization') return value.replace(/^Bearer\s+/i, '').trim();
-  }
-  return '';
-}
+type Json = JsonObject;
 
 export function mjApiRoot(baseUrl: string) {
   return baseUrl.trim().replace(/\/+$/, '').replace(/\/mj(?:\/.*)?$/i, '').replace(/\/+$/, '');
@@ -50,17 +35,6 @@ export function mjHeaders(headers: Record<string, string>, extra?: Record<string
     result['mj-api-secret'] = key;
   }
   return result;
-}
-
-function gcd(a: number, b: number) {
-  let x = Math.abs(a);
-  let y = Math.abs(b);
-  while (y) {
-    const next = x % y;
-    x = y;
-    y = next;
-  }
-  return x || 1;
 }
 
 /** Maps WxH or an already-canonical ratio onto a Midjourney --ar value. */
@@ -207,6 +181,7 @@ export async function submitMidjourneyImagine(deps: VideoAdapterDeps, body: unkn
 export async function pollMidjourneyTask(deps: VideoAdapterDeps, taskId: string) {
   const deadline = (deps.now ?? Date.now)() + Math.min(Math.max(Number(deps.pollTimeoutSeconds) || 900, 10), 3600) * 1000;
   const url = `${mjApiRoot(deps.baseUrl)}/mj/task/${encodeURIComponent(taskId)}/fetch`;
+  let attempt = 0;
   while (true) {
     if ((deps.now ?? Date.now)() >= deadline) throw providerTimeoutError();
     const payload = await mjGet(deps, url);
@@ -226,7 +201,8 @@ export async function pollMidjourneyTask(deps: VideoAdapterDeps, taskId: string)
       };
       throw error;
     }
-    await (deps.sleep ?? defaultSleep)(VIDEO_POLL_INTERVAL_MS, deps.signal);
+    await (deps.sleep ?? defaultSleep)(pollDelayMs(attempt), deps.signal);
+    attempt += 1;
   }
 }
 

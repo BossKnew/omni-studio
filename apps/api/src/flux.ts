@@ -8,14 +8,21 @@
  *
  * Video uses the same auth/root; see FluxVideoAdapter in video-adapters.ts.
  */
-import { VIDEO_POLL_INTERVAL_MS } from './domain-constants';
+import { pollDelayMs } from './domain-constants';
 import { MAX_ERROR_BYTES } from './safe-http.service';
 import {
+  bearerToken,
+  jsonObject,
+  parseJsonBody,
   providerProtocolError,
   providerTimeoutError,
   sleep as defaultSleep,
+  text,
+  type JsonObject,
   type VideoAdapterDeps,
 } from './provider-adapter';
+
+type Json = JsonObject;
 
 function fluxHttpTimeoutMs(deps: Pick<VideoAdapterDeps, 'timeoutSeconds'>) {
   return Math.min(Math.max(Number(deps.timeoutSeconds) || 180, 10), 3600) * 1000;
@@ -23,29 +30,6 @@ function fluxHttpTimeoutMs(deps: Pick<VideoAdapterDeps, 'timeoutSeconds'>) {
 
 function fluxPollTimeoutMs(deps: Pick<VideoAdapterDeps, 'pollTimeoutSeconds'>) {
   return Math.min(Math.max(Number(deps.pollTimeoutSeconds) || 900, 10), 3600) * 1000;
-}
-
-type Json = Record<string, unknown>;
-
-function jsonObject(value: unknown): Json | undefined {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as Json : undefined;
-}
-
-function text(value: unknown) {
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-}
-
-function parseJsonBody(body?: Buffer) {
-  if (!body?.length) return undefined;
-  try { return JSON.parse(body.toString('utf8')); }
-  catch { return undefined; }
-}
-
-function bearerToken(headers: Record<string, string>) {
-  for (const [name, value] of Object.entries(headers)) {
-    if (name.toLowerCase() === 'authorization') return value.replace(/^Bearer\s+/i, '').trim();
-  }
-  return '';
 }
 
 export function fluxApiRoot(baseUrl: string) {
@@ -268,6 +252,7 @@ function throwIfFluxFailed(payload: unknown) {
 
 export async function pollFluxUntilReady(deps: VideoAdapterDeps, token: string) {
   const deadline = (deps.now ?? Date.now)() + fluxPollTimeoutMs(deps);
+  let attempt = 0;
   while (true) {
     if ((deps.now ?? Date.now)() >= deadline) throw providerTimeoutError();
     const payload = await fluxGet(deps, fluxPollUrl(deps.baseUrl, token));
@@ -277,7 +262,8 @@ export async function pollFluxUntilReady(deps: VideoAdapterDeps, token: string) 
       if (!sample) throw providerProtocolError('供应商未返回结果地址');
       return sample;
     }
-    await (deps.sleep ?? defaultSleep)(VIDEO_POLL_INTERVAL_MS, deps.signal);
+    await (deps.sleep ?? defaultSleep)(pollDelayMs(attempt), deps.signal);
+    attempt += 1;
   }
 }
 

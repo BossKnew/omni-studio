@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, NotFoundException, Param, ParseUUIDPipe, Patch, Post, Put, Query, Req, Res, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, NotFoundException, Optional, Param, ParseUUIDPipe, Patch, Post, Put, Query, Req, Res, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { Request, Response } from 'express';
 import { CurrentUser, type AuthUser } from './common';
@@ -12,11 +12,14 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { diskStorage } from 'multer';
 import { MAX_IMAGE_BYTES } from './domain-constants';
+import { mediaStagingDirName } from './process-role';
+import { AssetContentCache } from './asset-content-cache';
 import { AssetLifecycleService } from './asset-lifecycle.service';
 import { cursorWhere, decodeCursor, encodeCursor, pageLimit } from './pagination';
 import { assetFilterWhere, parseAssetListQuery } from './asset-list-query';
-import { serializeAssetLinks } from './asset-response';
+import { ifNoneMatchHits, mediaCacheControl, mediaEtag, serializeAssetLinks } from './asset-response';
 import { canReadAsset, canShareAsset, canUnshareAsset } from './asset-access';
+import { UPLOAD_IMAGE_SETTING_KEY, uploadImagePolicyFromSetting } from './upload-image-policy';
 
 const noteSchema = z.object({ note: z.string().max(1000).nullable() }).strict();
 const shareSchema = z.object({ teamIds: z.array(uuidSchema).max(100) }).strict();
@@ -28,6 +31,7 @@ export class AssetsController {
     private prisma: PrismaService,
     private storage: StorageService,
     private lifecycle: AssetLifecycleService,
+    @Optional() private contentCache?: AssetContentCache,
   ) {}
 
   @Post('uploads')
@@ -35,7 +39,7 @@ export class AssetsController {
     limits: { fileSize: MAX_IMAGE_BYTES },
     storage: diskStorage({
       destination: (_request, _file, callback) => {
-        const directory = resolve(process.env.MEDIA_ROOT ?? resolve(process.cwd(), 'media'), '.staging');
+        const directory = resolve(process.env.MEDIA_ROOT ?? resolve(process.cwd(), 'media'), mediaStagingDirName());
         mkdirSync(directory, { recursive: true });
         callback(null, directory);
       },
@@ -44,11 +48,13 @@ export class AssetsController {
   }))
   async upload(@CurrentUser() user: AuthUser, @Body() body: unknown, @UploadedFile() file?: Express.Multer.File) {
     if (!file) throw new BadRequestException('请选择图片');
+    const role = isMaskUpload(body) ? 'MASK' : 'UPLOAD';
+    const setting = await this.prisma.systemSetting.findUnique({ where: { key: UPLOAD_IMAGE_SETTING_KEY }, select: { value: true } });
+    const { maxLongEdge } = uploadImagePolicyFromSetting(setting?.value);
     let image;
-    try { image = await this.storage.normalizeImageFile(file.path, file.mimetype); }
+    try { image = await this.storage.normalizeImageFile(file.path, file.mimetype, { thumbnail: role !== 'MASK', maxLongEdge, mask: role === 'MASK' }); }
     catch (error) { throw new BadRequestException((error as Error).message); }
     finally { await this.storage.deleteStaged(file.path); }
-    const role = isMaskUpload(body) ? 'MASK' : 'UPLOAD';
     const asset = await this.lifecycle.persistNormalized({
       userId: user.id, role, image,
       originalName: file.originalname.replace(/[\r\n]/g, '').slice(0, 255),
@@ -64,14 +70,14 @@ export class AssetsController {
     const where = { userId: user.id, AND: [filterWhere, cursorWhere('createdAt', cursor)] };
     const [rows, total] = await Promise.all([this.prisma.asset.findMany({
       where,
-      include: { job: { select: { prompt: true } }, thumbnail: { select: { id: true, deletedAt: true } }, shares: { select: { teamId: true } } },
+      include: { job: { select: { prompt: true } }, thumbnail: { select: { id: true, deletedAt: true, contentHash: true, width: true, height: true } }, shares: { select: { teamId: true } } },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: limit + 1,
-    }), this.prisma.asset.count({ where: { userId: user.id, ...filterWhere } })]);
+    }), cursor ? Promise.resolve(undefined) : this.prisma.asset.count({ where: { userId: user.id, ...filterWhere } })]);
     const hasMore = rows.length > limit;
     const assets = rows.slice(0, limit);
     const last = assets.at(-1);
-    return { items: assets.map((asset) => this.serializeOwned(asset)), nextCursor: hasMore && last ? encodeCursor(last.createdAt, last.id) : null, total };
+    return { items: assets.map((asset) => this.serializeOwned(asset)), nextCursor: hasMore && last ? encodeCursor(last.createdAt, last.id) : null, ...(total === undefined ? {} : { total }) };
   }
 
   @Get('assets/trash')
@@ -82,14 +88,14 @@ export class AssetsController {
     const where = { userId: user.id, AND: [filterWhere, cursorWhere('deletedAt', cursor)] };
     const [rows, total] = await Promise.all([this.prisma.asset.findMany({
       where,
-      include: { job: { select: { prompt: true } }, thumbnail: { select: { id: true, deletedAt: true, purgedAt: true } }, shares: { select: { teamId: true } } },
+      include: { job: { select: { prompt: true } }, thumbnail: { select: { id: true, deletedAt: true, purgedAt: true, contentHash: true, width: true, height: true } }, shares: { select: { teamId: true } } },
       orderBy: [{ deletedAt: 'desc' }, { id: 'desc' }],
       take: limit + 1,
-    }), this.prisma.asset.count({ where: { userId: user.id, ...filterWhere } })]);
+    }), cursor ? Promise.resolve(undefined) : this.prisma.asset.count({ where: { userId: user.id, ...filterWhere } })]);
     const hasMore = rows.length > limit;
     const assets = rows.slice(0, limit);
     const last = assets.at(-1);
-    return { items: assets.map((asset) => this.serializeOwned(asset, { allowTrash: true })), nextCursor: hasMore && last && last.deletedAt ? encodeCursor(last.deletedAt, last.id) : null, total };
+    return { items: assets.map((asset) => this.serializeOwned(asset, { allowTrash: true })), nextCursor: hasMore && last && last.deletedAt ? encodeCursor(last.deletedAt, last.id) : null, ...(total === undefined ? {} : { total }) };
   }
 
   @Post('assets/trash/empty')
@@ -117,17 +123,17 @@ export class AssetsController {
         include: {
           team: { select: { id: true, name: true } },
           sharedBy: { select: { displayName: true, username: true } },
-          asset: { include: { thumbnail: { select: { id: true, deletedAt: true } } } },
+          asset: { include: { thumbnail: { select: { id: true, deletedAt: true, contentHash: true, width: true, height: true } } } },
         },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: limit + 1,
       }),
-      this.prisma.assetShare.count({ where: filterWhere }),
+      cursor ? Promise.resolve(undefined) : this.prisma.assetShare.count({ where: filterWhere }),
     ]);
     const hasMore = rows.length > limit;
     const page = rows.slice(0, limit);
     const last = page.at(-1);
-    return { items: page.map((row) => this.serializeShared(row, user)), nextCursor: hasMore && last ? encodeCursor(last.createdAt, last.id) : null, total };
+    return { items: page.map((row) => this.serializeShared(row, user)), nextCursor: hasMore && last ? encodeCursor(last.createdAt, last.id) : null, ...(total === undefined ? {} : { total }) };
   }
 
   @Get('assets/:id/shares')
@@ -149,7 +155,7 @@ export class AssetsController {
     if (teamIds.length !== body.teamIds.length) throw new BadRequestException('工作团队不能重复');
     const asset = await this.prisma.asset.findFirst({ where: { id, deletedAt: null }, select: { id: true, userId: true, role: true, deletedAt: true } });
     if (!canShareAsset(user, asset)) throw new NotFoundException();
-    const allowedTeamIds = user.role === 'ADMIN' ? teamIds : teamIds.filter((teamId) => (user.teamIds ?? []).includes(teamId));
+    const allowedTeamIds = user.role === 'ADMIN' ? teamIds : teamIds.filter((teamId) => user.teamIds.includes(teamId));
     if (allowedTeamIds.length !== teamIds.length) throw new BadRequestException('只能分享到你所属的工作团队');
     if (teamIds.length && await this.prisma.workTeam.count({ where: { id: { in: teamIds } } }) !== teamIds.length) throw new BadRequestException('包含不存在的工作团队');
 
@@ -166,6 +172,7 @@ export class AssetsController {
       if (removed.length) await tx.auditLog.create({ data: { actorId: user.id, action: 'asset.unshared', targetType: 'asset', targetId: id, metadata: { teamIds: removed } } });
     });
 
+    await this.forgetContent(id);
     const items = await this.prisma.assetShare.findMany({ where: { assetId: id }, orderBy: { createdAt: 'asc' }, select: shareSelect });
     return { items: items.map((item) => ({ id: item.id, teamId: item.teamId, createdAt: item.createdAt, team: item.team })) };
   }
@@ -181,14 +188,14 @@ export class AssetsController {
     const result = await this.prisma.assetShare.deleteMany({ where: { assetId: id, teamId } });
     if (!result.count) throw new NotFoundException();
     await this.prisma.auditLog.create({ data: { actorId: user.id, action: 'asset.unshared', targetType: 'asset', targetId: id, metadata: { teamIds: [teamId] } } });
+    await this.forgetContent(id);
     return { ok: true };
   }
 
   @Patch('assets/:id')
   async updateNote(@CurrentUser() user: AuthUser, @Param('id', new ParseUUIDPipe({ version: '4' })) id: string, @Body() raw: unknown) {
     const body = parseBody(noteSchema, raw);
-    const note = typeof body.note === 'string' ? body.note.trim() : '';
-    if (note.length > 1000) throw new BadRequestException('备注不能超过 1000 个字符');
+    const note = body.note?.trim() ?? '';
     const asset = await this.prisma.asset.findFirst({ where: { id, userId: user.id, deletedAt: null }, select: { id: true } });
     if (!asset) throw new NotFoundException();
     const updated = await this.prisma.asset.update({ where: { id }, data: { note: note || null }, select: { id: true, note: true } });
@@ -197,27 +204,36 @@ export class AssetsController {
 
   @Get('assets/:id/content')
   async content(@CurrentUser() user: AuthUser, @Param('id', new ParseUUIDPipe({ version: '4' })) id: string, @Res() response: Response, @Req() request?: Request) {
-    const asset = await this.prisma.asset.findFirst({
-      where: { id, purgedAt: null },
-      select: {
-        objectKey: true, mimeType: true, sizeBytes: true, userId: true, role: true, deletedAt: true, purgedAt: true,
-        shares: { select: { teamId: true } },
-        thumbnailFor: { select: { userId: true, role: true, deletedAt: true, purgedAt: true, shares: { select: { teamId: true } } } },
-      },
-    });
+    const asset = this.contentCache
+      ? await this.contentCache.get(id)
+      : await this.prisma.asset.findFirst({
+        where: { id, purgedAt: null },
+        select: {
+          id: true, objectKey: true, mimeType: true, sizeBytes: true, contentHash: true, userId: true, role: true, deletedAt: true, purgedAt: true,
+          shares: { select: { teamId: true } },
+          thumbnailFor: { select: { userId: true, role: true, deletedAt: true, purgedAt: true, shares: { select: { teamId: true } } } },
+        },
+      });
     if (!canReadAsset(user, asset)) throw new NotFoundException();
+    const etag = mediaEtag(asset!);
     response.setHeader('Content-Type', asset!.mimeType);
-    response.setHeader('Cache-Control', 'private, max-age=3600');
+    response.setHeader('Cache-Control', mediaCacheControl(asset!.contentHash));
+    response.setHeader('ETag', etag);
     response.setHeader('X-Content-Type-Options', 'nosniff');
     response.setHeader('Accept-Ranges', 'bytes');
-    if (process.env.MEDIA_X_ACCEL_REDIRECT === 'true') {
+    const size = Number(asset!.sizeBytes);
+    const range = parseByteRange(request?.headers?.range, size);
+    if (!range && ifNoneMatchHits(request?.headers?.['if-none-match'], etag)) {
+      response.status(304).end();
+      return;
+    }
+    const probeRange = Boolean(range && range.end === range.start);
+    if (process.env.MEDIA_X_ACCEL_REDIRECT === 'true' && !probeRange) {
       const safeObjectKey = asset!.objectKey.split('/').map(encodeURIComponent).join('/');
       response.setHeader('X-Accel-Redirect', `/_protected_media/${safeObjectKey}`);
       response.end();
       return;
     }
-    const size = Number(asset!.sizeBytes);
-    const range = parseByteRange(request?.headers?.range, size);
     if (range) {
       response.status(206);
       response.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${size}`);
@@ -251,12 +267,18 @@ export class AssetsController {
     return { ok: true };
   }
 
+  private async forgetContent(assetId: string) {
+    if (!this.contentCache) return;
+    const thumbnail = await this.prisma.asset.findFirst({ where: { thumbnailForId: assetId }, select: { id: true } });
+    await this.contentCache.invalidate([assetId, thumbnail?.id]);
+  }
+
   private async visibleTeamIds(user: AuthUser, teamId?: string) {
     if (user.role === 'ADMIN') {
       if (!teamId) return [];
       return [teamId];
     }
-    const memberships = user.teamIds ?? [];
+    const memberships = user.teamIds;
     if (teamId) {
       if (!memberships.includes(teamId)) throw new BadRequestException('无权访问该工作团队');
       return [teamId];
@@ -264,8 +286,8 @@ export class AssetsController {
     return memberships;
   }
 
-  private serializeOwned<T extends { id: string; objectKey: string; sizeBytes: bigint; deletedAt: Date | null; purgeAfter?: Date | null; purgedAt?: Date | null; note: string | null; contentHash?: string | null; job?: { prompt: string } | null; thumbnail?: { id: string; deletedAt: Date | null; purgedAt?: Date | null } | null; shares?: Array<{ teamId: string }> }>(asset: T, options?: { allowTrash?: boolean }): Record<string, unknown> {
-    const { job, thumbnail, contentHash: _contentHash, shares, ...storedAsset } = asset;
+  private serializeOwned<T extends { id: string; objectKey: string; sizeBytes: bigint; deletedAt: Date | null; purgeAfter?: Date | null; purgedAt?: Date | null; note: string | null; contentHash?: string | null; job?: { prompt: string } | null; thumbnail?: { id: string; deletedAt: Date | null; purgedAt?: Date | null; contentHash?: string | null; width?: number | null; height?: number | null } | null; shares?: Array<{ teamId: string }> }>(asset: T, options?: { allowTrash?: boolean }): Record<string, unknown> {
+    const { job, thumbnail, contentHash, shares, ...storedAsset } = asset;
     return {
       ...storedAsset,
       note: storedAsset.note ?? null,
@@ -275,7 +297,7 @@ export class AssetsController {
       sizeBytes: asset.sizeBytes.toString(),
       deletedAt: storedAsset.deletedAt,
       purgeAfter: storedAsset.purgeAfter ?? null,
-      ...serializeAssetLinks({ id: asset.id, deletedAt: storedAsset.deletedAt, purgedAt: storedAsset.purgedAt, thumbnail }, options),
+      ...serializeAssetLinks({ id: asset.id, deletedAt: storedAsset.deletedAt, purgedAt: storedAsset.purgedAt, contentHash, thumbnail }, options),
       objectKey: undefined,
       purgedAt: undefined,
     };
@@ -286,7 +308,7 @@ export class AssetsController {
     createdAt: Date;
     team: { id: string; name: string };
     sharedBy: { displayName: string | null; username: string };
-    asset: { id: string; userId: string; role: string; mimeType: string; mediaKind?: string; durationMs?: number | null; sizeBytes: bigint; width: number | null; height: number | null; deletedAt: Date | null; objectKey: string; note: string | null; thumbnail?: { id: string; deletedAt: Date | null } | null };
+    asset: { id: string; userId: string; role: string; mimeType: string; mediaKind?: string; durationMs?: number | null; sizeBytes: bigint; width: number | null; height: number | null; deletedAt: Date | null; objectKey: string; note: string | null; contentHash?: string | null; thumbnail?: { id: string; deletedAt: Date | null; contentHash?: string | null; width?: number | null; height?: number | null } | null };
   }, user: AuthUser): Record<string, unknown> {
     return {
       id: row.asset.id,
@@ -305,7 +327,7 @@ export class AssetsController {
       canUnshare: row.asset.userId === user.id || user.role === 'ADMIN',
       note: null,
       generationPrompt: null,
-      ...serializeAssetLinks({ id: row.asset.id, deletedAt: row.asset.deletedAt, thumbnail: row.asset.thumbnail }),
+      ...serializeAssetLinks({ id: row.asset.id, deletedAt: row.asset.deletedAt, contentHash: row.asset.contentHash, thumbnail: row.asset.thumbnail }),
     };
   }
 }

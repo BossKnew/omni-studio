@@ -1,4 +1,3 @@
-
 import { useEffect } from 'react';
 import { useI18n } from '@/lib/i18n';
 import Icon from '@/components/Icon';
@@ -6,9 +5,10 @@ import Icon from '@/components/Icon';
 export type LightboxImage = {
   id: string;
   src: string;
+  poster?: string | null;
   alt: string;
   kind: string;
-  mediaKind?: 'IMAGE' | 'VIDEO';
+  mediaKind: 'IMAGE' | 'VIDEO';
   mimeType?: string;
   width?: number | null;
   height?: number | null;
@@ -47,8 +47,8 @@ export default function ImageLightbox({
   }}>
     <section className="image-viewer" role="dialog" aria-modal="true" aria-labelledby="image-viewer-title">
       <button className="image-viewer-close" type="button" onClick={onClose} aria-label={t('关闭图片查看器')} title={t('关闭')}><Icon name="close" /></button>
-      <div className="image-viewer-stage">{image.mediaKind === 'VIDEO' || image.mimeType === 'video/mp4'
-        ? <video src={image.src} controls playsInline poster={undefined} />
+      <div className="image-viewer-stage">{image.mediaKind === 'VIDEO'
+        ? <video src={image.src} poster={image.poster || undefined} controls playsInline preload="none" />
         : <img src={image.src} alt={image.alt} />}</div>
       <aside className="image-viewer-details">
         <div>
@@ -69,7 +69,7 @@ export default function ImageLightbox({
             <p className={image.note ? 'viewer-copy' : 'muted'}>{image.note || t('暂无备注')}</p>
           </div>
         </>}
-        {onUseAsReference && image.mediaKind !== 'VIDEO' && image.mimeType !== 'video/mp4' && <button className="button primary viewer-reference" type="button" onClick={onUseAsReference}>{t('设为下一张参考图')}</button>}
+        {onUseAsReference && image.mediaKind !== 'VIDEO' && <button className="button primary viewer-reference" type="button" onClick={onUseAsReference}>{t('设为下一张参考图')}</button>}
       </aside>
     </section>
   </div>;

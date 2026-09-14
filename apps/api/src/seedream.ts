@@ -21,11 +21,11 @@ export function seedreamApiRoot(baseUrl: string) {
 export function seedreamSize(size: unknown, quality?: unknown) {
   if (typeof quality === 'string') {
     const value = quality.trim();
-    if (/^(1k|1\.5k|2k|3k|4k)$/i.test(value)) return value.toUpperCase().replace('K', 'K');
+    if (/^(1k|1\.5k|2k|3k|4k)$/i.test(value)) return value.toUpperCase();
   }
   if (typeof size === 'string') {
     const value = size.trim();
-    if (/^(1k|1\.5k|2k|3k|4k)$/i.test(value)) return value.toUpperCase().replace('K', 'K');
+    if (/^(1k|1\.5k|2k|3k|4k)$/i.test(value)) return value.toUpperCase();
     if (/^\d{1,5}x\d{1,5}$/i.test(value)) {
       const match = /^(\d{1,5})x(\d{1,5})$/i.exec(value);
       if (match) {

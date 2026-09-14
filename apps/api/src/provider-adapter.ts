@@ -2,7 +2,7 @@
  * Stable boundary for remote media providers. Image generation still uses the
  * dedicated Images worker. Video models are selected by Model.adapterKind.
  */
-import { IMAGE_ADAPTER_KIND, isVideoAdapterKind, type VideoAdapterKind } from './domain-constants';
+import { IMAGE_ADAPTER_KIND } from './domain-constants';
 import type { SafeHttpService } from './safe-http.service';
 
 export type AdapterMediaKind = 'IMAGE' | 'VIDEO';
@@ -43,15 +43,43 @@ export interface MediaGenerationAdapter {
   testConnection(): Promise<{ ok: boolean; status?: number; message?: string }>;
 }
 
-export const RESERVED_VIDEO_ADAPTERS = ['openai-videos', 'seedance', 'wan', 'veo', 'minimax', 'runway', 'flux-video'] as const;
-
 export function normalizeAdapterKind(value: unknown): string {
   const kind = typeof value === 'string' ? value.trim() : '';
   return kind || IMAGE_ADAPTER_KIND;
 }
 
-export function assertVideoAdapterKind(kind: string): asserts kind is VideoAdapterKind {
-  if (!isVideoAdapterKind(kind)) throw new Error(`未知视频适配器：${kind}`);
+export type JsonObject = Record<string, unknown>;
+
+export function jsonObject(value: unknown): JsonObject | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : undefined;
+}
+
+export function text(value: unknown) {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+export function parseJsonBody(body?: Buffer) {
+  if (!body?.length) return undefined;
+  try { return JSON.parse(body.toString('utf8')); }
+  catch { return undefined; }
+}
+
+export function bearerToken(headers: Record<string, string>) {
+  for (const [name, value] of Object.entries(headers)) {
+    if (name.toLowerCase() === 'authorization') return value.replace(/^Bearer\s+/i, '').trim();
+  }
+  return '';
+}
+
+export function providerErrorCode(body?: Buffer) {
+  if (!body?.length) return undefined;
+  try {
+    const parsed = JSON.parse(body.toString('utf8'));
+    const code = parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.error && typeof parsed.error === 'object'
+      ? parsed.error.code
+      : undefined;
+    return typeof code === 'string' && /^[a-z0-9][a-z0-9_.-]{0,63}$/i.test(code) ? code : undefined;
+  } catch { return undefined; }
 }
 
 export function videoHttpFailure(status: number, providerCode?: string) {
@@ -137,10 +165,6 @@ export function providerConnectionError(cause?: unknown) {
       : '无法连接供应商，请管理员检查 Base URL、出站网络和 DNS',
   };
   return error;
-}
-
-export function mapAbortTimeoutError(error: unknown) {
-  return isAbortTimeoutError(error) ? providerHttpTimeoutError() : error;
 }
 
 export function mapProviderRequestError(error: unknown) {

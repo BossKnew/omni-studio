@@ -82,7 +82,7 @@ export default function StudioSidebar({
             <button className="icon-button" onClick={() => setRenamingId('')} disabled={renaming} aria-label={t('取消重命名')}><Icon name="close" /></button>
           </div> : <>
             <button className="conversation-main" onClick={() => void onLoadConversation(item.id)} title={item.title}>
-              <span className="conversation-title">{item.title}</span><span className="conversation-count">{item._count.jobs}</span>
+              <span className="conversation-title">{item.title}</span>
             </button>
             <div className="conversation-actions">
               <button className="icon-button" onClick={() => beginRename(item)} aria-label={`${t('重命名')} ${item.title}`} title={t('重命名')}><Icon name="edit" /></button>

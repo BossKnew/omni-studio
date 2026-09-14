@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { UnrecoverableError } from 'bullmq';
 import sharp from 'sharp';
 import { Request } from 'undici';
-import { GenerationProcessor, chatImageCompletionBody, extractChatImageRefs, normalizeImageQuality, parseChatCompletionImages, parseProviderImages, providerEditImageField, providerErrorCode, providerErrorFingerprint, providerHttpFailure, providerImageParameters } from './generation.processor';
+import { GenerationProcessor, chatImageCompletionBody, extractChatImageRefs, normalizeImageQuality, parseChatCompletionImages, parseProviderImages, providerEditImageField, providerErrorCode, providerErrorFingerprint, providerHttpFailure, providerImageParameters, providerPromptFromJob } from './generation.processor';
 import { StorageService } from './storage.service';
 
 async function stageAndSave(storage: StorageService, userId: string, buffer: Buffer, mimeType: string) {
@@ -343,5 +343,73 @@ describe('GenerationProcessor mask lifecycle', () => {
     expect(JSON.parse(http.requestToFile.mock.calls[1][1].body)).toEqual(chatImageCompletionBody('gpt-4o-image', 'a green square'));
     expect(assets.persistNormalized).toHaveBeenCalled();
     expect(lifecycle.finish).toHaveBeenCalledWith('user-1', 'job-chat', 'SUCCEEDED');
+  });
+
+  it('persists provider outputs after inspect without re-encoding the original file', async () => {
+    const storage = new StorageService();
+    const inspect = jest.spyOn(storage, 'inspectImageWithThumbnail');
+    const normalize = jest.spyOn(storage, 'normalizeImageFile');
+    const input = await sharp({ create: { width: 16, height: 16, channels: 4, background: '#00f' } }).png().toBuffer();
+    const job = {
+      id: 'job-inspect', userId: 'user-1', status: 'QUEUED', mode: 'TEXT_TO_IMAGE', user: { status: 'ACTIVE', role: 'USER' },
+      model: { upstreamModelId: 'image-model', provider: { baseUrl: 'https://api.example.com/v1', encryptedApiKey: 'encrypted', encryptedHeaders: null, timeoutSeconds: 30 } },
+      parameters: { size: '1024x1024', quality: 'auto', count: 1 }, prompt: 'a blue square',
+    };
+    const prisma: any = {
+      generationJob: { findUnique: jest.fn().mockResolvedValueOnce(job).mockResolvedValueOnce({ status: 'RUNNING' }), update: jest.fn().mockResolvedValue({}), updateMany: jest.fn() },
+      user: { findUnique: jest.fn().mockResolvedValue({ status: 'ACTIVE' }) },
+    };
+    const http: any = {
+      requestToFile: jest.fn(async (_url: string, _init: unknown, destination: string) => {
+        await writeFile(destination, JSON.stringify({ data: [{ b64_json: input.toString('base64') }] }), { flag: 'wx' });
+        return { ok: true, status: 200, headers: new Headers({ 'content-type': 'application/json' }), filePath: destination, sizeBytes: input.length, url: 'https://api.example.com/v1/images/generations' };
+      }),
+    };
+    const assets = { persistNormalized: jest.fn().mockResolvedValue({}), removeJobOutputs: jest.fn().mockResolvedValue(0n) };
+    const lifecycle = { start: jest.fn().mockResolvedValue(true), finish: jest.fn().mockResolvedValue(true), releaseAndPublish: jest.fn().mockResolvedValue(undefined) };
+    const processor = new GenerationProcessor(prisma, { decrypt: jest.fn(() => 'secret') } as any, storage, http, assets as any, lifecycle as any);
+
+    try {
+      await processor.process({ data: { jobId: 'job-inspect' }, attemptsMade: 0, opts: { attempts: 3 }, discard: jest.fn() } as any);
+      expect(inspect).toHaveBeenCalled();
+      expect(normalize).not.toHaveBeenCalled();
+      expect(assets.persistNormalized).toHaveBeenCalledWith(expect.objectContaining({
+        role: 'OUTPUT',
+        image: expect.objectContaining({ mimeType: 'image/png', width: 16, height: 16, thumbnail: expect.objectContaining({ mimeType: 'image/webp' }) }),
+      }));
+    } finally {
+      inspect.mockRestore();
+      normalize.mockRestore();
+    }
+  });
+
+  it('sends the composed style prompt to the provider while keeping the stored prompt unchanged', async () => {
+    const storage = new StorageService();
+    const input = await sharp({ create: { width: 16, height: 16, channels: 4, background: '#00f' } }).png().toBuffer();
+    const job = {
+      id: 'job-style', userId: 'user-1', status: 'QUEUED', mode: 'TEXT_TO_IMAGE', user: { status: 'ACTIVE', role: 'USER' },
+      model: { upstreamModelId: 'gpt-image-1', provider: { baseUrl: 'https://api.example.com/v1', encryptedApiKey: 'encrypted', encryptedHeaders: null, timeoutSeconds: 30 } },
+      parameters: { size: '1024x1024', quality: 'high', count: 1, stylePresetId: 'cinematic' }, prompt: '一只橘猫',
+    };
+    const prisma: any = {
+      generationJob: { findUnique: jest.fn().mockResolvedValueOnce(job).mockResolvedValueOnce({ status: 'RUNNING' }), update: jest.fn().mockResolvedValue({}), updateMany: jest.fn() },
+      user: { findUnique: jest.fn().mockResolvedValue({ status: 'ACTIVE' }) },
+    };
+    const http: any = {
+      requestToFile: jest.fn(async (_url: string, _init: unknown, destination: string) => {
+        await writeFile(destination, JSON.stringify({ data: [{ b64_json: input.toString('base64') }] }), { flag: 'wx' });
+        return { ok: true, status: 200, headers: new Headers({ 'content-type': 'application/json' }), filePath: destination, sizeBytes: input.length, url: 'https://api.example.com/v1/images/generations' };
+      }),
+    };
+    const assets = { persistNormalized: jest.fn().mockResolvedValue({}), removeJobOutputs: jest.fn().mockResolvedValue(0n) };
+    const lifecycle = { start: jest.fn().mockResolvedValue(true), finish: jest.fn().mockResolvedValue(true), releaseAndPublish: jest.fn().mockResolvedValue(undefined) };
+    const processor = new GenerationProcessor(prisma, { decrypt: jest.fn(() => 'secret') } as any, storage, http, assets as any, lifecycle as any);
+
+    await processor.process({ data: { jobId: 'job-style' }, attemptsMade: 0, opts: { attempts: 3 }, discard: jest.fn() } as any);
+
+    const composed = providerPromptFromJob(job);
+    expect(composed).toContain('一只橘猫');
+    expect(composed).toContain('画面风格：');
+    expect(JSON.parse(http.requestToFile.mock.calls[0][1].body)).toEqual(providerImageParameters('gpt-image-1', composed, job.parameters));
   });
 });
