@@ -13,8 +13,8 @@ describe('ConversationsController asset cleanup', () => {
 
     await expect(controller.outputAssets({ id: 'user-1' } as any, 'conversation-1')).resolves.toEqual({
       items: [
-        { id: 'output-1', mimeType: 'image/png', downloadName: 'session-0001.png', deleted: false, contentUrl: '/api/v1/assets/output-1/content', thumbnailUrl: '/api/v1/assets/output-1/content' },
-        { id: 'output-2', mimeType: 'image/jpeg', downloadName: 'session-0002.jpg', deleted: false, contentUrl: '/api/v1/assets/output-2/content', thumbnailUrl: '/api/v1/assets/output-2/content' },
+        { id: 'output-1', mimeType: 'image/png', downloadName: 'session-0001.png', deleted: false, contentUrl: '/api/v1/assets/output-1/content', thumbnailUrl: null, thumbnailWidth: null, thumbnailHeight: null },
+        { id: 'output-2', mimeType: 'image/jpeg', downloadName: 'session-0002.jpg', deleted: false, contentUrl: '/api/v1/assets/output-2/content', thumbnailUrl: null, thumbnailWidth: null, thumbnailHeight: null },
       ],
       total: 2,
     });
@@ -75,7 +75,7 @@ describe('ConversationsController asset cleanup', () => {
         { id: 'exclusive-upload', objectKey: 'user-1/exclusive.png', sizeBytes: 20n, deletedAt: null, purgedAt: null, role: 'UPLOAD', thumbnail: { id: 'exclusive-thumb', objectKey: 'user-1/exclusive.webp', sizeBytes: 2n, deletedAt: null, purgedAt: null, role: 'THUMBNAIL' } },
         { id: 'shared-upload', objectKey: 'user-1/shared.png', sizeBytes: 30n, deletedAt: null, purgedAt: null, role: 'UPLOAD', thumbnail: null },
       ]) },
-      generationJob: { findMany: jest.fn().mockResolvedValue([{ parameters: { sourceAssetIds: ['shared-upload'] } }]) },
+      $queryRaw: jest.fn().mockResolvedValue([{ id: 'shared-upload' }]),
       $transaction: jest.fn((callback: any) => callback(transaction)),
     };
     const storage: any = { deleteMany: jest.fn().mockResolvedValue(undefined) };
@@ -85,7 +85,7 @@ describe('ConversationsController asset cleanup', () => {
     await expect(controller.remove({ id: 'user-1' } as any, 'conversation-1')).resolves.toEqual({ ok: true, deletedAssetIds: ['exclusive-upload'] });
 
     expect(prisma.asset.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: { in: ['exclusive-upload', 'shared-upload'] }, userId: 'user-1', role: 'UPLOAD' } }));
-    expect(prisma.generationJob.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ conversationId: { not: 'conversation-1' } }) }));
+    expect(prisma.$queryRaw).toHaveBeenCalled();
     expect(storage.deleteMany).toHaveBeenCalledWith(['user-1/exclusive.png', 'user-1/exclusive.webp']);
     expect(transaction.asset.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ['exclusive-upload', 'exclusive-thumb'] } } });
     expect(quota.releaseStorage).toHaveBeenCalledWith('user-1', 20n);
@@ -104,7 +104,7 @@ describe('ConversationsController asset cleanup', () => {
       asset: { findMany: jest.fn().mockResolvedValue([
         { id: 'shared-upload', objectKey: 'user-1/shared.png', sizeBytes: 30n, deletedAt: null, purgedAt: null, role: 'UPLOAD', shares: [{ id: 'share-1' }], thumbnail: null },
       ]) },
-      generationJob: { findMany: jest.fn().mockResolvedValue([]) },
+      $queryRaw: jest.fn().mockResolvedValue([]),
       $transaction: jest.fn((callback: any) => callback(transaction)),
     };
     const storage: any = { deleteMany: jest.fn().mockResolvedValue(undefined) };

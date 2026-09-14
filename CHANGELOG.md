@@ -2,6 +2,12 @@
 
 All notable changes to OmniStudio are documented here.
 
+## [0.3.0] - 2026-09-07
+
+- Image generation: visual style presets with large sample cards and a horizontal scroller (cinematic, storybook, anime, figurine, ink wash, clay, film, product by default). Selecting a card appends a style suffix at generation time for text-to-image and image edit, including restyle-only edits with an empty prompt. Admins can add, edit, reorder, or delete presets and replace sample images and style prompts.
+- Uploaded reference, original, and mask images are scaled down to an admin-configured max long edge (default 4096, range 1024–8192) instead of being rejected above 8192. Generated outputs are unchanged.
+- Optional Compose overlay `compose.worker.yml` splits the HTTP API and generation worker. Default remains a single `all` process.
+
 ## [0.2.0] - 2026-08-28
 
 - Video generation: text-to-video and image-to-video with aspect ratio, duration, and optional resolution.

@@ -8,9 +8,9 @@ OmniStudio is a self-hosted image and video generation workspace for teams. It c
 
 - **Generation**: text-to-image, reference-image editing, masked inpainting, text-to-video, image-to-video, and first-and-last-frame video. Admins enable image-to-video and first/last frames per model. Each model has resolution tiers, aspect ratios, duration, quality, a points price, and optional per-tier multipliers.
 - **Providers**: a provider stores credentials and a Base URL only. Each model picks image or video, then an adapter — OpenAI Images, Qwen/Wan, Nano Banana, Seedream, Midjourney, Flux, or Runway for images; Sora, Seedance, Wan/HappyHorse, Veo, MiniMax, Runway, or Flux for video. Gateways speaking the OpenAI Videos protocol can reuse that adapter. One Google AI Studio key can host Nano Banana and Veo; one Volcengine Ark key can host Seedream and Seedance; one BFL key can host Flux image and video; one Runway key can host Runway image and video. Midjourney uses a midjourney-proxy-compatible gateway (there is no official Midjourney API).
-- **Studio**: image/video switch, conversations, regenerate, retry, playback, download (current session or selected library items), references, first/last-frame slots, mask drawing, prompt history and favorites, and prompt polish.
+- **Studio**: image/video switch, conversations, regenerate, retry, playback, download (current session or selected library items), references, first/last-frame slots, mask drawing, style presets, prompt history and favorites, and prompt polish.
 - **Assets**: conversations, asset library (filter by type, source, model, date, and notes/prompts), work-team sharing, recycle bin with restore, thumbnails, storage quotas. Deleted files still count against storage until they expire.
-- **Administration**: user approval, registration and session settings, user groups (model access and a sliding-window points quota per person), work teams (sharing only), usage ledger, providers and models, display labels for size/ratio/quality/duration, prompt-polish providers, recycle-bin retention (default 30 days).
+- **Administration**: user approval, registration and session settings, user groups (model access and a sliding-window points quota per person), work teams (sharing only), usage ledger, providers and models, display labels for size/ratio/quality/duration, style presets (sample images and prompts), prompt-polish providers, recycle-bin retention (default 30 days), upload image max long edge (default 4096).
 - **Prompt polishing**: text-to-image, image-edit, and text-to-video. Admins can configure several providers; only one can be enabled at a time.
 - **Security**: mandatory admin MFA, encrypted API keys and MFA secrets, SSRF protection, rate limiting, CSRF protection
 - **UI**: English and Chinese
@@ -48,7 +48,7 @@ Open <http://localhost:8080>. The first login uses the bootstrap admin account f
 - Use HTTPS: set `APP_ORIGINS` to the exact origin and `ALLOW_INSECURE_HTTP=false`
 - Use separate, strong database, Redis, encryption, and admin passwords
 - Back up PostgreSQL data and the media volume regularly
-- Optional overlays: Traefik (`compose.traefik.yml`), external database/Redis (`compose.external.yml`), Compose secrets (`compose.secrets.yml`)
+- Optional overlays: Traefik (`compose.traefik.yml`), external database/Redis (`compose.external.yml`), Compose secrets (`compose.secrets.yml`), split HTTP/worker (`compose.worker.yml`)
 - Reverse proxy examples in the [`deploy`](deploy) directory
 
 ## 🛠️ Local Development

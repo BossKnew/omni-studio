@@ -1,13 +1,11 @@
-import { optionLabelFor, optionLabelMapFromItems, parseOptionLabelMap } from './option-labels';
+import { optionLabelMapFromItems, parseOptionLabelMap } from './option-labels';
 
 describe('option labels', () => {
-  it('parses stored maps and falls back to the raw value', () => {
-    const map = parseOptionLabelMap({ auto: { zh: '自动', en: 'Auto' }, '1024x1024': { zh: '1:1' } });
-    expect(optionLabelFor(map, 'auto', 'zh')).toBe('自动');
-    expect(optionLabelFor(map, 'auto', 'en')).toBe('Auto');
-    expect(optionLabelFor(map, '1024x1024', 'zh')).toBe('1:1');
-    expect(optionLabelFor(map, '1024x1024', 'en')).toBe('1024x1024');
-    expect(optionLabelFor(map, 'low', 'zh')).toBe('low');
+  it('parses stored maps', () => {
+    expect(parseOptionLabelMap({ auto: { zh: '自动', en: 'Auto' }, '1024x1024': { zh: '1:1' } })).toEqual({
+      auto: { zh: '自动', en: 'Auto' },
+      '1024x1024': { zh: '1:1', en: '' },
+    });
   });
 
   it('rejects duplicate values and overlong labels', () => {

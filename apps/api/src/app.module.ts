@@ -29,18 +29,23 @@ import { AuthContextService } from './auth-context.service';
 import { GenerationEventsService } from './generation-events.service';
 import { GenerationLifecycleService } from './generation-lifecycle.service';
 import { AssetLifecycleService } from './asset-lifecycle.service';
+import { AssetContentCache } from './asset-content-cache';
 import { PromptsController } from './prompts.controller';
 import { PromptPolishAdminController, PromptPolishController } from './prompt-polish.controller';
 import { PromptPolishService } from './prompt-polish.service';
 import { TeamsController } from './teams.controller';
 import { UsageController } from './usage.controller';
 import { OptionLabelsController } from './option-labels.controller';
+import { StylePresetsController } from './style-presets.controller';
+import { StylePresetsService } from './style-presets.service';
+import { httpControllersEnabled, runsGenerationWorkers } from './process-role';
 
-const sharedProviders = [PrismaService, RedisService, RateLimitService, QuotaService, CryptoService, MfaCryptoService, MfaService, StorageService, AssetLifecycleService, SafeHttpService, AuthContextService, GenerationEventsService, GenerationLifecycleService, AuthService, PromptPolishService];
+const sharedProviders = [PrismaService, RedisService, RateLimitService, QuotaService, CryptoService, MfaCryptoService, MfaService, StorageService, AssetContentCache, AssetLifecycleService, SafeHttpService, AuthContextService, GenerationEventsService, GenerationLifecycleService, AuthService, PromptPolishService, StylePresetsService];
+const httpControllers = [HealthController, AuthController, AdminController, ProvidersController, ModelsController, TeamsController, UsageController, OptionLabelsController, StylePresetsController, AssetsController, ConversationsController, GenerationsController, PromptsController, PromptPolishAdminController, PromptPolishController];
 
 @Module({
   imports: [BullModule.forRoot({ connection: parseRedisUrl() }), BullModule.registerQueue({ name: 'image-generation' }), BullModule.registerQueue({ name: 'video-generation' })],
-  controllers: [HealthController, AuthController, AdminController, ProvidersController, ModelsController, TeamsController, UsageController, OptionLabelsController, AssetsController, ConversationsController, GenerationsController, PromptsController, PromptPolishAdminController, PromptPolishController],
-  providers: [...sharedProviders, GenerationProcessor, VideoGenerationProcessor, UploadAdmissionInterceptor, { provide: APP_GUARD, useClass: SessionGuard }],
+  controllers: httpControllersEnabled() ? httpControllers : [HealthController],
+  providers: [...sharedProviders, ...(runsGenerationWorkers() ? [GenerationProcessor, VideoGenerationProcessor] : []), UploadAdmissionInterceptor, { provide: APP_GUARD, useClass: SessionGuard }],
 })
 export class AppModule {}

@@ -5,18 +5,13 @@ import { StorageService } from './storage.service';
 import { QuotaService } from './quota.service';
 import { parseBody } from './validation';
 import { z } from 'zod';
-import { generationJobSelect, serializeGenerationJob } from './generation-response';
+import { generationJobSelect, serializeGenerationJob, sourceAssetIdsFromParameters } from './generation-response';
 import { cursorWhere, decodeCursor, encodeCursor, pageLimit } from './pagination';
 import { ACTIVE_JOB_STATUSES } from './domain-constants';
 import { serializeAssetLinks } from './asset-response';
+import { findSourceIdsUsedInOtherConversations } from './source-asset-refs';
 
 const titleSchema = z.object({ title: z.string().trim().min(1).max(80) }).strict();
-
-function sourceAssetIds(parameters: unknown) {
-  if (!parameters || typeof parameters !== 'object' || Array.isArray(parameters)) return [];
-  const ids = (parameters as Record<string, unknown>).sourceAssetIds;
-  return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : [];
-}
 
 @Controller('conversations')
 export class ConversationsController {
@@ -30,7 +25,7 @@ export class ConversationsController {
       where: { userId: user.id, ...cursorWhere('updatedAt', cursor) },
       orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
       take: limit + 1,
-      select: { id: true, title: true, createdAt: true, updatedAt: true, _count: { select: { jobs: true } } },
+      select: { id: true, title: true, createdAt: true, updatedAt: true },
     });
     const hasMore = rows.length > limit;
     const items = rows.slice(0, limit);
@@ -52,7 +47,7 @@ export class ConversationsController {
     const assets = await this.prisma.asset.findMany({
       where: { userId: user.id, role: 'OUTPUT', deletedAt: null, job: { conversationId: id, userId: user.id } },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      select: { id: true, mimeType: true, createdAt: true, deletedAt: true },
+      select: { id: true, mimeType: true, createdAt: true, deletedAt: true, contentHash: true },
     });
     return {
       items: assets.map((asset, index) => ({
@@ -83,7 +78,7 @@ export class ConversationsController {
   @Patch(':id')
   async rename(@CurrentUser() user: AuthUser, @Param('id', new ParseUUIDPipe({ version: '4' })) id: string, @Body() raw: unknown) {
     const body = parseBody(titleSchema, raw);
-    const result = await this.prisma.conversation.updateMany({ where: { id, userId: user.id }, data: { title: body.title.trim().slice(0, 80) } });
+    const result = await this.prisma.conversation.updateMany({ where: { id, userId: user.id }, data: { title: body.title } });
     if (!result.count) throw new NotFoundException();
     return { ok: true };
   }
@@ -96,20 +91,17 @@ export class ConversationsController {
     });
     if (!conversation) throw new NotFoundException();
     if (conversation.jobs.some((job) => ACTIVE_JOB_STATUSES.includes(job.status as typeof ACTIVE_JOB_STATUSES[number]))) throw new ConflictException('会话仍有活动任务，暂时不能删除');
-    const referencedSourceIds = [...new Set(conversation.jobs.flatMap((job) => sourceAssetIds(job.parameters)))];
+    const referencedSourceIds = [...new Set(conversation.jobs.flatMap((job) => sourceAssetIdsFromParameters(job.parameters)))];
     const uploadedSources = referencedSourceIds.length ? await this.prisma.asset.findMany({
       where: { id: { in: referencedSourceIds }, userId: user.id, role: 'UPLOAD' },
       select: { id: true, objectKey: true, sizeBytes: true, deletedAt: true, purgedAt: true, role: true, shares: { select: { id: true }, take: 1 }, thumbnail: { select: { id: true, objectKey: true, sizeBytes: true, deletedAt: true, purgedAt: true, role: true } } },
     }) : [];
-    const sharedJobs = uploadedSources.length ? await this.prisma.generationJob.findMany({
-      where: {
-        userId: user.id,
-        conversationId: { not: id },
-        OR: uploadedSources.map((asset) => ({ parameters: { path: ['sourceAssetIds'], array_contains: [asset.id] } })),
-      },
-      select: { parameters: true },
-    }) : [];
-    const sharedSourceIds = new Set(sharedJobs.flatMap((job) => sourceAssetIds(job.parameters)));
+    const sharedSourceIds = await findSourceIdsUsedInOtherConversations(
+      this.prisma,
+      user.id,
+      id,
+      uploadedSources.map((asset) => asset.id),
+    );
     const exclusiveUploads = uploadedSources.filter((asset) => !sharedSourceIds.has(asset.id) && !asset.shares?.length);
     const assets = [
       ...conversation.jobs.flatMap((job) => job.assets),

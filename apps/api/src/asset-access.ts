@@ -22,7 +22,7 @@ export type AssetAccessView = {
 
 export function sharedToViewerWhere(user: AuthUser): Prisma.AssetShareWhereInput {
   if (user.role === 'ADMIN') return {};
-  return { teamId: { in: user.teamIds ?? [] } };
+  return { teamId: { in: user.teamIds } };
 }
 
 export function accessibleSourceWhere(user: AuthUser): Prisma.AssetWhereInput {
@@ -57,7 +57,7 @@ function libraryTarget(asset: AssetAccessView) {
 function hasShareAccess(user: AuthUser, shares: AssetShareTeam[] | null | undefined) {
   if (!shares?.length) return false;
   if (user.role === 'ADMIN') return true;
-  const teams = new Set(user.teamIds ?? []);
+  const teams = new Set(user.teamIds);
   return shares.some(({ teamId }) => teams.has(teamId));
 }
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from '@/lib/router';
 import { api, json } from '@/lib/api';
 import { downloadFiles, type DownloadResult } from '@/lib/download';
@@ -30,6 +30,8 @@ export default function StudioPage() {
   const [assetTotal, setAssetTotal] = useState(0);
   const [libraryEpoch, setLibraryEpoch] = useState(0);
   const [view, setView] = useState<StudioView>('studio');
+  const [libraryMounted, setLibraryMounted] = useState(false);
+  if (view === 'assets' && !libraryMounted) setLibraryMounted(true);
   const [conversationId, setConversationId] = useState('');
   const [conversation, setConversation] = useState<ConversationDetail | null>(null);
   const [references, setReferences] = useState<ReferenceSelection[]>([]);
@@ -48,19 +50,20 @@ export default function StudioPage() {
   const collectionRefreshRef = useRef<Promise<void> | null>(null);
   const collectionRevisionRef = useRef(0);
 
+  const applyUsage = useCallback((snapshot: UsageSnapshot) => {
+    setUsage(snapshot);
+    if (typeof snapshot.libraryAssetCount === 'number') setAssetTotal(snapshot.libraryAssetCount);
+  }, []);
+
   const refreshCollections = useCallback(() => {
     if (collectionRefreshRef.current) return collectionRefreshRef.current;
     const revision = collectionRevisionRef.current;
     let refresh!: Promise<void>;
     refresh = (async () => {
-      const [conversationPage, assetPage] = await Promise.all([
-        api<CursorPage<ConversationSummary>>('/conversations'),
-        api<CursorPage<Asset>>('/assets'),
-      ]);
+      const conversationPage = await api<CursorPage<ConversationSummary>>('/conversations');
       if (collectionRevisionRef.current !== revision) return;
       setConversations(conversationPage.items);
       setConversationCursor(conversationPage.nextCursor);
-      setAssetTotal(assetPage.total ?? assetPage.items.length);
     })().finally(() => { if (collectionRefreshRef.current === refresh) collectionRefreshRef.current = null; });
     collectionRefreshRef.current = refresh;
     return refresh;
@@ -76,10 +79,12 @@ export default function StudioPage() {
 
   const applyJobUpdate = useCallback((updatedJob: GenerationJob) => {
     const targetConversationId = updatedJob.conversationId;
-    setConversation((current) => {
-      if (!current || targetConversationId && current.id !== targetConversationId) return current;
-      const hasJob = current.jobs.some((job) => job.id === updatedJob.id);
-      return { ...current, jobs: hasJob ? current.jobs.map((job) => job.id === updatedJob.id ? updatedJob : job) : [...current.jobs, updatedJob] };
+    startTransition(() => {
+      setConversation((current) => {
+        if (!current || targetConversationId && current.id !== targetConversationId) return current;
+        const hasJob = current.jobs.some((job) => job.id === updatedJob.id);
+        return { ...current, jobs: hasJob ? current.jobs.map((job) => job.id === updatedJob.id ? updatedJob : job) : [...current.jobs, updatedJob] };
+      });
     });
   }, []);
 
@@ -93,13 +98,13 @@ export default function StudioPage() {
     handledTerminalJobs.current.add(job.id);
     try {
       const [usageSnapshot] = await Promise.all([api<UsageSnapshot>('/usage'), refreshCollections()]);
-      setUsage(usageSnapshot);
+      applyUsage(usageSnapshot);
       if (job.status === 'SUCCEEDED') setLibraryEpoch((epoch) => epoch + 1);
       setSyncError('');
     } catch {
       setSyncError(t('任务状态已更新，但摘要同步失败。请刷新页面。'));
     }
-  }, [applyJobUpdate, refreshCollections]);
+  }, [applyJobUpdate, applyUsage, refreshCollections]);
 
   useEffect(() => {
     async function loadWorkspace() {
@@ -112,16 +117,16 @@ export default function StudioPage() {
           api<UsageSnapshot>('/usage'),
           api<OptionLabelMap>('/option-labels'),
           refreshCollections(),
-        ]).then(([models, snapshot, labelMap]) => [models, snapshot, labelMap] as const);
+        ]);
         setModels(modelRows);
-        setUsage(usageSnapshot);
+        applyUsage(usageSnapshot);
         setOptionLabels(labels);
       } catch {
         router.replace('/login');
       }
     }
     void loadWorkspace();
-  }, [refreshCollections, router]);
+  }, [applyUsage, refreshCollections, router]);
 
   useEffect(() => {
     if (!user || user.mustChangePwd) return;
@@ -171,7 +176,7 @@ export default function StudioPage() {
     setActionError('');
     try {
       const result = await api<ConversationDeletion>(`/conversations/${deleteTarget.id}`, json('DELETE'));
-      const deletedAssetIds = new Set(result.deletedAssetIds ?? []);
+      const deletedAssetIds = new Set(result.deletedAssetIds);
       const revision = ++collectionRevisionRef.current;
       setConversations((items) => items.filter((item) => item.id !== deleteTarget.id));
       setAssetTotal((total) => Math.max(0, total - deletedAssetIds.size));
@@ -181,10 +186,8 @@ export default function StudioPage() {
       setDeleteTarget(null);
       setLibraryEpoch((epoch) => epoch + 1);
       try {
-        const assetPage = await api<CursorPage<Asset>>('/assets');
-        if (collectionRevisionRef.current === revision) {
-          setAssetTotal(assetPage.total ?? assetPage.items.length);
-        }
+        const usageSnapshot = await api<UsageSnapshot>('/usage');
+        if (collectionRevisionRef.current === revision) applyUsage(usageSnapshot);
         setSyncError('');
       } catch {
         setSyncError(t('会话已删除，但资产列表同步失败。请刷新页面。'));
@@ -196,27 +199,29 @@ export default function StudioPage() {
     }
   }
 
-  async function handleCreated(result: GenerationCreated) {
+  const handleCreated = useCallback(async (result: GenerationCreated) => {
     await loadConversation(result.conversationId);
-    try { setUsage(await api<UsageSnapshot>('/usage')); } catch { /* The next completed job can refresh usage. */ }
-  }
+    try { applyUsage(await api<UsageSnapshot>('/usage')); } catch { /* The next completed job can refresh usage. */ }
+  }, [applyUsage, loadConversation]);
 
-  async function retryGeneration(jobId: string) {
+  const clearReusePreset = useCallback(() => setReusePreset(null), []);
+
+  const retryGeneration = useCallback(async (jobId: string) => {
     const result = await api<GenerationCreated>(`/generations/${jobId}/retry`, json('POST'));
     await loadConversation(result.conversationId);
-  }
+  }, [loadConversation]);
 
-  async function reuseGeneration(jobId: string) {
+  const reuseGeneration = useCallback(async (jobId: string) => {
     const preset = await api<GenerationReuse>(`/generations/${jobId}/reuse`);
     setView('studio');
     setReusePreset(preset);
-  }
+  }, []);
 
-  async function downloadConversation(id: string): Promise<DownloadResult> {
+  const downloadConversation = useCallback(async (id: string): Promise<DownloadResult> => {
     const result = await api<{ items: DownloadAsset[]; total: number }>(`/conversations/${id}/output-assets`);
     if (!result.items.length) throw new Error(t('当前会话没有可下载的生成素材'));
     return downloadFiles(result.items.map((item) => ({ url: item.contentUrl, name: item.downloadName })));
-  }
+  }, [t]);
 
   async function loadMoreConversations() {
     if (!conversationCursor) return;
@@ -225,11 +230,11 @@ export default function StudioPage() {
     setConversationCursor(page.nextCursor);
   }
 
-  async function loadOlderJobs() {
+  const loadOlderJobs = useCallback(async () => {
     if (!conversation?.nextJobCursor) return;
     const older = await api<ConversationDetail>(`/conversations/${conversation.id}?jobCursor=${encodeURIComponent(conversation.nextJobCursor)}`);
     setConversation((current) => current?.id === older.id ? { ...current, jobs: [...older.jobs, ...current.jobs], nextJobCursor: older.nextJobCursor } : current);
-  }
+  }, [conversation]);
 
   function updateAssetNote(id: string, note: string | null) {
     setConversation((current) => current ? {
@@ -244,8 +249,8 @@ export default function StudioPage() {
     if (viewer?.image.id === asset.id) setViewer(null);
   }
 
-  function selectReference(asset: Asset, generationPrompt?: string) {
-    if (asset.mediaKind === 'VIDEO' || asset.mimeType === 'video/mp4') {
+  const selectReference = useCallback((asset: Asset, generationPrompt?: string) => {
+    if (asset.mediaKind === 'VIDEO') {
       setSyncError(t('视频不能作为参考图'));
       return;
     }
@@ -259,7 +264,21 @@ export default function StudioPage() {
       return [...current, { key: 'asset-' + asset.id, kind: 'asset', asset: selected }];
     });
     setViewer(null);
-  }
+  }, [t]);
+
+  const openJobImage = useCallback((asset: Asset) => {
+    setViewer({ image: toLightboxImage(asset, t), reference: asset });
+  }, [t]);
+
+  const requestDeleteConversation = useCallback(() => {
+    if (!conversation) return;
+    setDeleteTarget(conversations.find((item) => item.id === conversation.id) ?? { id: conversation.id, title: conversation.title });
+  }, [conversation, conversations]);
+
+  const referenceIds = useMemo(
+    () => references.filter((reference) => reference.kind === 'asset').map((reference) => reference.asset.id),
+    [references],
+  );
 
   async function logout() {
     await api('/auth/logout', json('POST'));
@@ -291,10 +310,11 @@ export default function StudioPage() {
     <main className="main">
       <div className="workspace-topbar"><LanguageSwitcher /></div>
       {syncError && <p className="error" role="alert">{syncError}</p>}
-      {view === 'assets' ? <AssetLibrary models={models} libraryEpoch={libraryEpoch} onStartCreation={startNewCreation} onOpenAsset={(asset) => setViewer({ image: toLightboxImage(asset, t), reference: asset.deletedAt ? undefined : asset })} onUseAsReference={(asset) => selectReference(asset)} onAssetNoteSaved={updateAssetNote} onAssetDeleted={removeAsset} onAssetRestored={() => setAssetTotal((total) => total + 1)} onAssetSharesSaved={() => undefined} onAssetUnshared={() => undefined} isAdmin={user.role === 'ADMIN'} /> : <div className={`studio-workspace ${conversationId ? 'has-conversation' : ''}`}>
-        <StudioComposer models={models} optionLabels={optionLabels} conversationId={conversationId} references={references} onReferencesChange={setReferences} reusePreset={reusePreset} onReuseConsumed={() => setReusePreset(null)} onCreated={handleCreated} />
-        {conversation && <JobHistory conversation={conversation} onLoadOlder={loadOlderJobs} referenceIds={references.filter((reference) => reference.kind === 'asset').map((reference) => reference.asset.id)} onDeleteConversation={() => setDeleteTarget(conversations.find((item) => item.id === conversation.id) ?? { id: conversation.id, title: conversation.title, _count: { jobs: conversation.jobs.length } })} onUseAsReference={selectReference} onOpenImage={(asset) => setViewer({ image: toLightboxImage(asset, t), reference: asset })} onRetry={retryGeneration} onReuse={reuseGeneration} onDownloadConversation={downloadConversation} />}
-      </div>}
+      {libraryMounted && <div style={{ display: view === 'assets' ? undefined : 'none', minHeight: 0, flex: 1, overflow: 'auto' }}><AssetLibrary models={models} libraryEpoch={libraryEpoch} onStartCreation={startNewCreation} onOpenAsset={(asset) => setViewer({ image: toLightboxImage(asset, t), reference: asset.deletedAt ? undefined : asset })} onUseAsReference={(asset) => selectReference(asset)} onAssetNoteSaved={updateAssetNote} onAssetDeleted={removeAsset} onAssetRestored={() => setAssetTotal((total) => total + 1)} isAdmin={user.role === 'ADMIN'} /></div>}
+      <div className={`studio-workspace ${conversationId ? 'has-conversation' : ''}`} style={{ display: view === 'assets' ? 'none' : undefined }}>
+        <StudioComposer models={models} optionLabels={optionLabels} conversationId={conversationId} references={references} onReferencesChange={setReferences} reusePreset={reusePreset} onReuseConsumed={clearReusePreset} onCreated={handleCreated} />
+        {conversation && <JobHistory conversation={conversation} onLoadOlder={loadOlderJobs} referenceIds={referenceIds} onDeleteConversation={requestDeleteConversation} onUseAsReference={selectReference} onOpenImage={openJobImage} onRetry={retryGeneration} onReuse={reuseGeneration} onDownloadConversation={downloadConversation} />}
+      </div>
     </main>
 
     {viewer && <ImageLightbox image={viewer.image} onClose={() => setViewer(null)} onUseAsReference={viewer.reference ? () => selectReference(viewer.reference!, viewer.image.prompt ?? undefined) : undefined} />}
@@ -315,9 +335,10 @@ function toLightboxImage(asset: Asset, t: (key: string) => string): LightboxImag
   return {
     id: asset.id,
     src: asset.contentUrl,
+    poster: asset.thumbnailUrl,
     alt: asset.role === 'OUTPUT' ? t('生成资产') : t('上传资产'),
     kind: asset.mediaKind === 'VIDEO' ? (asset.role === 'OUTPUT' ? t('生成视频') : t('上传视频')) : (asset.role === 'OUTPUT' ? t('生成图片') : t('上传图片')),
-    mediaKind: asset.mediaKind ?? 'IMAGE',
+    mediaKind: asset.mediaKind,
     mimeType: asset.mimeType,
     width: asset.width,
     height: asset.height,

@@ -1,4 +1,7 @@
 import { getCookieLocale, getInitialLocale, translateMessage } from '@/lib/i18n';
+import { apiCacheMode } from './api-cache';
+
+export { apiCacheMode };
 
 let csrfToken = '';
 
@@ -16,7 +19,7 @@ export async function api<T = unknown>(path: string, init?: RequestInit): Promis
   const headers = new Headers(init?.headers);
   if (init?.body && !(init.body instanceof FormData)) headers.set('Content-Type', 'application/json');
   if (unsafe && csrfToken) headers.set('X-CSRF-Token', csrfToken);
-  const response = await fetch(`/api/v1${path}`, { ...init, headers, credentials: 'include', cache: 'no-store' });
+  const response = await fetch(`/api/v1${path}`, { ...init, headers, credentials: 'include', cache: apiCacheMode(path, init) });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
     const rawMessage = Array.isArray(payload.message) ? payload.message.join('\n') : payload.message ?? `请求失败：${response.status}`;

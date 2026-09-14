@@ -1,19 +1,27 @@
 import { writeFile } from 'node:fs/promises';
 import { FormData as UndiciFormData } from 'undici';
-import { VIDEO_POLL_INTERVAL_MS, MAX_VIDEO_BYTES, isVideoAdapterKind } from './domain-constants';
+import { pollDelayMs, MAX_VIDEO_BYTES, isVideoAdapterKind } from './domain-constants';
 import { MAX_ERROR_BYTES } from './safe-http.service';
 import {
   aspectRatioOf,
+  bearerToken,
   durationSecondsOf,
+  jsonObject,
+  parseJsonBody,
+  providerErrorCode,
   providerProtocolError,
   providerTimeoutError,
   resolutionOf,
   sleep as defaultSleep,
+  text,
   videoHttpFailure,
+  type JsonObject,
   type MediaGenerationAdapter,
   type MediaGenerationRequest,
   type VideoAdapterDeps,
 } from './provider-adapter';
+
+type Json = JsonObject;
 import {
   fluxApiRoot,
   fluxHeaders,
@@ -26,26 +34,6 @@ import {
   pollFluxUntilReady,
   testFluxConnection,
 } from './flux';
-function providerErrorCode(body?: Buffer) {
-  if (!body?.length) return undefined;
-  try {
-    const parsed = JSON.parse(body.toString('utf8'));
-    const code = parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.error && typeof parsed.error === 'object'
-      ? (parsed.error as { code?: unknown }).code
-      : undefined;
-    return typeof code === 'string' && /^[a-z0-9][a-z0-9_.-]{0,63}$/i.test(code) ? code : undefined;
-  } catch { return undefined; }
-}
-
-type Json = Record<string, unknown>;
-
-function jsonObject(value: unknown): Json | undefined {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as Json : undefined;
-}
-
-function text(value: unknown) {
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-}
 
 function dataUrl(asset: { mimeType: string; bytes: Uint8Array }) {
   const mime = asset.mimeType === 'image/jpeg' || asset.mimeType === 'image/webp' ? asset.mimeType : 'image/png';
@@ -95,12 +83,6 @@ function throwHttp(status: number, body?: Buffer) {
   }
   error.providerFailure = failure;
   throw error;
-}
-
-function parseJsonBody(body?: Buffer) {
-  if (!body?.length) return undefined;
-  try { return JSON.parse(body.toString('utf8')); }
-  catch { return undefined; }
 }
 
 export function videoHttpTimeoutMs(deps: Pick<VideoAdapterDeps, 'timeoutSeconds'>) {
@@ -282,13 +264,6 @@ function veoImage(asset: { mimeType: string; bytes: Uint8Array }) {
   return { bytesBase64Encoded: Buffer.from(asset.bytes).toString('base64'), mimeType: mime };
 }
 
-function bearerToken(headers: Record<string, string>) {
-  for (const [name, value] of Object.entries(headers)) {
-    if (name.toLowerCase() === 'authorization') return value.replace(/^Bearer\s+/i, '').trim();
-  }
-  return '';
-}
-
 export function minimaxApiRoot(baseUrl: string) {
   return baseUrl.trim().replace(/\/+$/, '').replace(/\/v[12](?:\/.*)?$/i, '');
 }
@@ -422,6 +397,7 @@ abstract class BaseVideoAdapter implements MediaGenerationAdapter {
   abstract readonly kind: string;
   readonly mediaKind = 'VIDEO' as const;
   private pollDeadlineAt?: number;
+  private pollAttempt = 0;
   constructor(protected readonly deps: VideoAdapterDeps) {}
 
   abstract createTask(request: MediaGenerationRequest): Promise<string>;
@@ -439,7 +415,8 @@ abstract class BaseVideoAdapter implements MediaGenerationAdapter {
   }
 
   protected async wait(signal?: AbortSignal) {
-    await (this.deps.sleep ?? defaultSleep)(VIDEO_POLL_INTERVAL_MS, signal ?? this.deps.signal);
+    await (this.deps.sleep ?? defaultSleep)(pollDelayMs(this.pollAttempt), signal ?? this.deps.signal);
+    this.pollAttempt += 1;
   }
 
   protected timedOut() {

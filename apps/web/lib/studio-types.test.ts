@@ -7,6 +7,7 @@ function job(id: string, status: GenerationStatus): ConversationDetail['jobs'][n
     id,
     status,
     mode: 'TEXT_TO_IMAGE',
+    mediaKind: 'IMAGE',
     prompt: '',
     errorMessage: null,
     parameters: {},

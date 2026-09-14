@@ -1,9 +1,11 @@
-import { BadRequestException, Body, Controller, Get, Put } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Put, Req, Res } from '@nestjs/common';
+import type { Request, Response } from 'express';
 import { CurrentUser, Roles, type AuthUser } from './common';
 import { PrismaService } from './prisma.service';
 import { parseBody } from './validation';
 import { z } from 'zod';
 import { OPTION_LABELS_KEY, optionLabelItemsFromMap, optionLabelMapFromItems, parseOptionLabelMap } from './option-labels';
+import { applyPrivateCatalogCache, catalogEtag } from './cache-policy';
 
 const itemSchema = z.object({
   value: z.string().min(1).max(64),
@@ -17,8 +19,10 @@ export class OptionLabelsController {
   constructor(private prisma: PrismaService) {}
 
   @Get('option-labels')
-  async publicLabels() {
-    return this.readMap();
+  async publicLabels(@Req() request?: Request, @Res({ passthrough: true }) response?: Response) {
+    const map = await this.readMap();
+    if (applyPrivateCatalogCache(request, response, catalogEtag(map))) return;
+    return map;
   }
 
   @Roles('ADMIN')

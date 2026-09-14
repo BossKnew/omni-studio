@@ -116,6 +116,19 @@ model SystemSetting {
   updatedAt DateTime @updatedAt
 }
 
+model StylePreset {
+  id               String   @id
+  nameZh           String
+  nameEn           String
+  suffix           String   @db.Text
+  previewObjectKey String?
+  sortOrder        Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([sortOrder, id])
+}
+
 model PromptPolishSetting {
   id                String    @id
   name              String
@@ -253,6 +266,7 @@ model PromptEntry {
   id          String   @id @default(uuid())
   userId      String
   prompt      String   @db.Text
+  promptHash  String
   isFavorite  Boolean  @default(false)
   usageCount  Int      @default(1)
   lastUsedAt  DateTime @default(now())
@@ -260,7 +274,7 @@ model PromptEntry {
   updatedAt   DateTime @updatedAt
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@unique([userId, prompt])
+  @@unique([userId, promptHash])
   @@index([userId, isFavorite, lastUsedAt, id])
   @@index([userId, lastUsedAt, id])
 }
@@ -293,6 +307,7 @@ model GenerationJob {
   @@index([userId, createdAt])
   @@index([conversationId, createdAt, id])
   @@index([status])
+  @@index([modelId])
 }
 
 model Asset {

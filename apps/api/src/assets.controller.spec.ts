@@ -1,5 +1,6 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { AssetsController } from './assets.controller';
+import { encodeCursor } from './pagination';
 
 describe('AssetsController', () => {
   const user = { id: 'user-1', role: 'USER', username: 'alice' } as any;
@@ -17,6 +18,7 @@ describe('AssetsController', () => {
         update: jest.fn(),
         create: jest.fn(),
       },
+      systemSetting: { findUnique: jest.fn().mockResolvedValue(null) },
     };
     storage = { normalizeImageFile: jest.fn(), saveStaged: jest.fn(), deleteStaged: jest.fn(), delete: jest.fn() };
     lifecycle = { persistNormalized: jest.fn(), remove: jest.fn(), restore: jest.fn(), purge: jest.fn(), emptyTrash: jest.fn() };
@@ -30,7 +32,19 @@ describe('AssetsController', () => {
 
     await controller.upload(user, { role: 'MASK' }, file);
 
+    expect(storage.normalizeImageFile).toHaveBeenCalledWith('staging/upload', 'image/png', { thumbnail: false, maxLongEdge: 4096, mask: true });
     expect(lifecycle.persistNormalized).toHaveBeenCalledWith(expect.objectContaining({ userId: 'user-1', role: 'MASK', originalName: 'mask.png' }));
+  });
+
+  it('passes the configured upload max long edge into image normalization', async () => {
+    const file = { path: 'staging/upload', size: 3, mimetype: 'image/jpeg', originalname: 'photo.jpg' } as Express.Multer.File;
+    prisma.systemSetting.findUnique.mockResolvedValue({ value: { maxLongEdge: 2048 } });
+    storage.normalizeImageFile.mockResolvedValue({ path: 'staging/normalized', sizeBytes: 3n, mimeType: 'image/jpeg', width: 2048, height: 1536 });
+    lifecycle.persistNormalized.mockResolvedValue({ id: 'asset-1', role: 'UPLOAD', objectKey: 'user-1/photo.jpg', sizeBytes: 3n, deletedAt: null, note: null, thumbnail: null });
+
+    await controller.upload(user, {}, file);
+
+    expect(storage.normalizeImageFile).toHaveBeenCalledWith('staging/upload', 'image/jpeg', { thumbnail: true, maxLongEdge: 2048, mask: false });
   });
 
   it('trims and saves a note only after confirming ownership', async () => {
@@ -68,7 +82,7 @@ describe('AssetsController', () => {
     }]);
     prisma.asset.count = jest.fn().mockResolvedValue(1);
     const result = await controller.list(user);
-    expect(result.items[0]).toMatchObject({ id: 'asset-1', note: '封面候选', generationPrompt: '雨夜城市', visibility: 'owned', sharedTeamIds: [], sizeBytes: '4096', contentUrl: '/api/v1/assets/asset-1/content', thumbnailUrl: '/api/v1/assets/asset-1/content' });
+    expect(result.items[0]).toMatchObject({ id: 'asset-1', note: '封面候选', generationPrompt: '雨夜城市', visibility: 'owned', sharedTeamIds: [], sizeBytes: '4096', contentUrl: '/api/v1/assets/asset-1/content?v=private-sha256', thumbnailUrl: null, thumbnailWidth: null, thumbnailHeight: null });
     expect(result.items[0].objectKey).toBeUndefined();
     expect(result.items[0].contentHash).toBeUndefined();
     expect((result.items[0] as any).job).toBeUndefined();
@@ -101,6 +115,15 @@ describe('AssetsController', () => {
     expect(prisma.asset.count).toHaveBeenCalledWith({ where: { userId: 'user-1', ...filterWhere } });
   });
 
+  it('skips the total count on subsequent cursor pages', async () => {
+    prisma.asset.findMany.mockResolvedValue([]);
+    prisma.asset.count = jest.fn();
+    const cursor = encodeCursor(new Date('2026-08-17T00:00:00.000Z'), '123e4567-e89b-42d3-a456-426614174000');
+    const result = await controller.list(user, { cursor });
+    expect(result.total).toBeUndefined();
+    expect(prisma.asset.count).not.toHaveBeenCalled();
+  });
+
   it('rejects an invalid owned-library filter', async () => {
     await expect(controller.list(user, { mediaKind: 'AUDIO' })).rejects.toBeInstanceOf(BadRequestException);
     expect(prisma.asset.findMany).not.toHaveBeenCalled();
@@ -115,8 +138,22 @@ describe('AssetsController', () => {
     await controller.content(user, 'asset-1', response);
 
     expect(response.setHeader).toHaveBeenCalledWith('Cache-Control', 'private, max-age=3600');
+    expect(response.setHeader).toHaveBeenCalledWith('ETag', '"asset-1-3"');
     expect(response.setHeader).toHaveBeenCalledWith('X-Content-Type-Options', 'nosniff');
     expect(stream.pipe).toHaveBeenCalledWith(response);
+  });
+
+  it('returns 304 when the client already has the fingerprinted bytes', async () => {
+    prisma.asset.findFirst.mockResolvedValue({
+      id: 'asset-1', userId: 'user-1', role: 'OUTPUT', deletedAt: null, shares: [],
+      objectKey: 'user-1/private.png', mimeType: 'image/png', sizeBytes: 3n, contentHash: 'deadbeef',
+    });
+    const response = { setHeader: jest.fn(), status: jest.fn().mockReturnThis(), end: jest.fn(), destroy: jest.fn() } as any;
+    await controller.content(user, 'asset-1', response, { headers: { 'if-none-match': '"deadbeef"' } } as any);
+    expect(response.setHeader).toHaveBeenCalledWith('Cache-Control', 'private, max-age=31536000, immutable');
+    expect(response.status).toHaveBeenCalledWith(304);
+    expect(response.end).toHaveBeenCalledTimes(1);
+    expect(storage.createReadStream).toBeUndefined();
   });
 
   it('serves byte ranges for video seeking', async () => {
@@ -134,7 +171,7 @@ describe('AssetsController', () => {
 
   it('offloads authenticated media to the internal Nginx location in production', async () => {
     process.env.MEDIA_X_ACCEL_REDIRECT = 'true';
-    prisma.asset.findFirst.mockResolvedValue({ userId: 'user-1', role: 'OUTPUT', deletedAt: null, shares: [], objectKey: 'user-1/private image.png', mimeType: 'image/png', sizeBytes: 3n });
+    prisma.asset.findFirst.mockResolvedValue({ id: 'asset-1', userId: 'user-1', role: 'OUTPUT', deletedAt: null, shares: [], objectKey: 'user-1/private image.png', mimeType: 'image/png', sizeBytes: 3n });
     const response = { setHeader: jest.fn(), end: jest.fn() } as any;
 
     await controller.content(user, 'asset-1', response);
@@ -142,6 +179,21 @@ describe('AssetsController', () => {
     expect(response.setHeader).toHaveBeenCalledWith('X-Accel-Redirect', '/_protected_media/user-1/private%20image.png');
     expect(response.end).toHaveBeenCalledTimes(1);
     expect(storage.createReadStream).toBeUndefined();
+  });
+
+  it('serves one-byte range probes from Node even when Nginx acceleration is enabled', async () => {
+    process.env.MEDIA_X_ACCEL_REDIRECT = 'true';
+    prisma.asset.findFirst.mockResolvedValue({ id: 'asset-1', userId: 'user-1', role: 'OUTPUT', deletedAt: null, shares: [], objectKey: 'user-1/clip.mp4', mimeType: 'video/mp4', sizeBytes: 100n });
+    const stream = { on: jest.fn().mockReturnThis(), pipe: jest.fn() };
+    storage.createReadStream = jest.fn(() => stream);
+    const response = { setHeader: jest.fn(), status: jest.fn().mockReturnThis(), destroy: jest.fn(), end: jest.fn() } as any;
+
+    await controller.content(user, 'asset-1', response, { headers: { range: 'bytes=0-0' } } as any);
+
+    expect(response.status).toHaveBeenCalledWith(206);
+    expect(response.setHeader).not.toHaveBeenCalledWith('X-Accel-Redirect', expect.anything());
+    expect(storage.createReadStream).toHaveBeenCalledWith('user-1/clip.mp4', { start: 0, end: 0 });
+    expect(response.end).not.toHaveBeenCalled();
   });
 
   it('moves a library asset into trash', async () => {

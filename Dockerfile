@@ -6,7 +6,8 @@ COPY apps/api/package.json apps/api/package.json
 COPY apps/web/package.json apps/web/package.json
 RUN npm ci
 COPY . .
-RUN DATABASE_URL=postgresql://omnistudio:build-only@localhost:5432/omnistudio npm run db:generate && npm run build
+RUN DATABASE_URL=postgresql://omnistudio:build-only@localhost:5432/omnistudio npm run db:generate && npm run build \
+    && find apps/web/dist -type f \( -name '*.js' -o -name '*.css' -o -name '*.html' -o -name '*.svg' -o -name '*.json' \) -exec gzip -9 -n -k {} +
 
 FROM node:24.19.0-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03 AS api-deps
 WORKDIR /app

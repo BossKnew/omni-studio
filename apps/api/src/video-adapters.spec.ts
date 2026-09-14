@@ -1,5 +1,5 @@
 import { createVideoAdapter, minimaxApiRoot, minimaxResolution, minimaxTaskId, minimaxVideoUrl, openaiVideoSize, openaiVideoTaskId, runwayApiRoot, runwayRatio, runwayTaskId, runwayVideoUrl, seedanceTaskId, seedanceVideoUrl, veoApiRoot, veoOperationName, veoOperationUrl, veoResolution, veoVideoUri, wanApiRoot, wanInput, wanParameters, wanStatus, wanTaskId, wanVideoUrl } from './video-adapters';
-import { connectionFailureDetail, isAbortTimeoutError, isProviderConnectionError, mapAbortTimeoutError, mapProviderRequestError, type MediaGenerationRequest, type VideoAdapterDeps } from './provider-adapter';
+import { connectionFailureDetail, isAbortTimeoutError, isProviderConnectionError, mapProviderRequestError, type MediaGenerationRequest, type VideoAdapterDeps } from './provider-adapter';
 
 function request(overrides: Partial<MediaGenerationRequest> = {}): MediaGenerationRequest {
   return {
@@ -433,7 +433,7 @@ describe('video adapter timeouts', () => {
     const timeout = Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
     expect(isAbortTimeoutError(timeout)).toBe(true);
     expect(isAbortTimeoutError(new Error('socket hang up'))).toBe(false);
-    expect(mapAbortTimeoutError(timeout)).toMatchObject({
+    expect(mapProviderRequestError(timeout)).toMatchObject({
       noRetry: true,
       providerFailure: { code: 'PROVIDER_TIMEOUT', message: expect.stringContaining('提高生成超时') },
     });

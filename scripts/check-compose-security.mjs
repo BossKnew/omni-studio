@@ -47,6 +47,10 @@ if (mode === 'standalone') {
   assert(!(services.api.ports?.length), 'API must not publish host ports');
   assert(exactNetworks(services.api, ['app', 'data']), 'API must join only app and data');
   assert(exactNetworks(services.migrate, ['app', 'data']), 'migrate must join only app and data');
+  if (services.worker) {
+    assert(!(services.worker.ports?.length), 'worker must not publish host ports');
+    assert(exactNetworks(services.worker, ['app', 'data']), 'worker must join only app and data');
+  }
   assert(config.networks?.data?.internal === true, 'data network must be internal');
   const nginxMedia = volumeAt(services.nginx, '/data/media');
   assert(nginxMedia, 'Web service must mount media for authenticated sendfile delivery');

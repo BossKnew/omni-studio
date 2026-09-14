@@ -1,0 +1,81 @@
+# Split HTTP from image/video workers. Same image, two processes.
+# docker compose -f docker-compose.yml -f compose.worker.yml up -d --build
+#
+# Keep this off on 2 CPU / 4 GiB hosts; the bundled API already runs both roles.
+
+x-app-hardening: &app-hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 256
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+
+services:
+  api:
+    environment:
+      PROCESS_ROLE: api
+      NODE_OPTIONS: --max-old-space-size=${API_NODE_HEAP_MIB:-384}
+    mem_limit: ${SPLIT_API_MEMORY_LIMIT:-768m}
+    cpus: ${SPLIT_API_CPU_LIMIT:-0.75}
+
+  worker:
+    <<: *app-hardening
+    build: { context: ., target: api }
+    image: omni-studio:api
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    restart: unless-stopped
+    networks: [app, data]
+    environment:
+      PROCESS_ROLE: worker
+      DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_URL_FILE: ${DATABASE_URL_FILE:-}
+      POSTGRES_DB: ${POSTGRES_DB:-omnistudio}
+      POSTGRES_USER: ${POSTGRES_USER:-omnistudio}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      REDIS_URL: ${REDIS_URL:-}
+      REDIS_URL_FILE: ${REDIS_URL_FILE:-}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      PROVIDER_SECRET_KEY: ${PROVIDER_SECRET_KEY:-}
+      PROVIDER_SECRET_KEY_FILE: ${PROVIDER_SECRET_KEY_FILE:-}
+      PROVIDER_SECRET_KEYS: ${PROVIDER_SECRET_KEYS:-}
+      PROVIDER_SECRET_KEYS_FILE: ${PROVIDER_SECRET_KEYS_FILE:-}
+      MFA_SECRET_KEY: ${MFA_SECRET_KEY:-}
+      MFA_SECRET_KEY_FILE: ${MFA_SECRET_KEY_FILE:-}
+      MFA_SECRET_KEYS: ${MFA_SECRET_KEYS:-}
+      MFA_SECRET_KEYS_FILE: ${MFA_SECRET_KEYS_FILE:-}
+      MFA_SECRET_ACTIVE_KID: ${MFA_SECRET_ACTIVE_KID:-}
+      MFA_SECRET_ACTIVE_KID_FILE: ${MFA_SECRET_ACTIVE_KID_FILE:-}
+      MFA_ISSUER: ${MFA_ISSUER:-OmniStudio}
+      MEDIA_ROOT: /data/media
+      APP_ORIGINS: ${APP_ORIGINS:-}
+      ALLOW_INSECURE_HTTP: ${ALLOW_INSECURE_HTTP:-false}
+      FORWARDED_HEADERS_MODE: ${FORWARDED_HEADERS_MODE:-ignore}
+      HTTP_BIND_ADDRESS: ${HTTP_BIND_ADDRESS:-127.0.0.1}
+      OUTBOUND_PRIVATE_ALLOWLIST: ${OUTBOUND_PRIVATE_ALLOWLIST:-}
+      OUTBOUND_HTTP_ALLOWLIST: ${OUTBOUND_HTTP_ALLOWLIST:-}
+      MAX_ACTIVE_JOBS_PER_USER: ${MAX_ACTIVE_JOBS_PER_USER:-3}
+      MAX_QUEUED_JOBS: ${MAX_QUEUED_JOBS:-200}
+      USER_STORAGE_QUOTA_GIB: ${USER_STORAGE_QUOTA_GIB:-10}
+      MAX_SSE_CONNECTIONS_PER_USER: ${MAX_SSE_CONNECTIONS_PER_USER:-3}
+      GENERATION_RATE_LIMIT: ${GENERATION_RATE_LIMIT:-10}
+      UPLOAD_RATE_LIMIT: ${UPLOAD_RATE_LIMIT:-30}
+      MAX_CONCURRENT_UPLOADS_PER_USER: ${MAX_CONCURRENT_UPLOADS_PER_USER:-2}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
+      VIDEO_WORKER_CONCURRENCY: ${VIDEO_WORKER_CONCURRENCY:-1}
+      IMAGE_PROCESSING_CONCURRENCY: ${IMAGE_PROCESSING_CONCURRENCY:-1}
+      PASSWORD_HASH_CONCURRENCY: ${PASSWORD_HASH_CONCURRENCY:-1}
+      MEDIA_X_ACCEL_REDIRECT: ${MEDIA_X_ACCEL_REDIRECT:-true}
+      MALLOC_ARENA_MAX: "2"
+      NODE_OPTIONS: --max-old-space-size=${WORKER_HEAP_MIB:-768}
+    volumes: ["${MEDIA_VOLUME:-media_data}:/data/media"]
+    mem_limit: ${WORKER_MEMORY_LIMIT:-1536m}
+    cpus: ${WORKER_CPU_LIMIT:-1.5}
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy, required: false }
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://localhost:4000/api/v1/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10

@@ -26,6 +26,7 @@ export type UsagePolicy = {
 export type UsageSnapshot = {
   storageBytes: string;
   storageQuotaBytes: string;
+  libraryAssetCount?: number;
   policies: UsagePolicy[];
 };
 export type CursorPage<T> = { items: T[]; nextCursor: string | null; total?: number };
@@ -39,16 +40,16 @@ export type ResolutionTier = { label: string; shortEdge: number };
 export type StudioModel = {
   id: string;
   displayName: string;
-  mediaKind?: MediaKind;
+  mediaKind: MediaKind;
   supportsGeneration: boolean;
   supportsEdit: boolean;
   supportsInpaint: boolean;
-  supportsFirstLastFrame?: boolean;
+  supportsFirstLastFrame: boolean;
   allowedSizes: string[];
-  resolutionTiers?: ResolutionTier[];
-  allowedRatios?: string[];
+  resolutionTiers: ResolutionTier[];
+  allowedRatios: string[];
   allowedQualities: string[];
-  allowedDurations?: number[];
+  allowedDurations: number[];
   maxImages: number;
   maxInputImages: number;
   costPerUnit: number;
@@ -56,7 +57,7 @@ export type StudioModel = {
   defaults: { size?: string; quality?: string; count?: number; durationSeconds?: number };
 };
 
-export type ConversationSummary = { id: string; title: string; _count: { jobs: number } };
+export type ConversationSummary = { id: string; title: string };
 
 export type StudioGroup = { id: string; name: string };
 export type StudioTeam = { id: string; name: string };
@@ -64,10 +65,12 @@ export type StudioTeam = { id: string; name: string };
 export type Asset = {
   id: string;
   role: 'UPLOAD' | 'OUTPUT' | 'MASK';
-  mediaKind?: MediaKind;
+  mediaKind: MediaKind;
   durationMs?: number | null;
   contentUrl: string;
   thumbnailUrl?: string | null;
+  thumbnailWidth?: number | null;
+  thumbnailHeight?: number | null;
   width: number | null;
   height: number | null;
   mimeType?: string;
@@ -93,7 +96,7 @@ export type GenerationJob = {
   conversationId?: string;
   status: GenerationStatus;
   mode: GenerationMode;
-  mediaKind?: MediaKind;
+  mediaKind: MediaKind;
   prompt: string;
   errorMessage: string | null;
   parameters: { count?: number; durationSeconds?: number; size?: string; quality?: string };
@@ -119,6 +122,7 @@ export type GenerationReuse = {
   durationSeconds?: number | null;
   sourceAssets: Asset[];
   requiresMaskRedraw: boolean;
+  stylePresetId?: string | null;
 };
 
 export type PromptEntry = {
@@ -169,5 +173,5 @@ export function firstLastReferences(references: ReferenceSelection[]) {
 }
 
 export function sameReferenceSelection(left: ReferenceSelection[], right: ReferenceSelection[]) {
-  return left.length === right.length && left.every((item, index) => item.key === right[index]?.key && item.frameRole === right[index]?.frameRole);
+  return left.length === right.length && left.every((item, index) => item.key === right[index].key && item.frameRole === right[index].frameRole);
 }

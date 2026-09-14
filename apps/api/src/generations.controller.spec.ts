@@ -1,5 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { conversationTitleFromPrompt, GenerationsController } from './generations.controller';
+import { STYLE_PRESETS } from './style-presets';
 
 describe('GenerationsController retry', () => {
   const user = { id: 'user-1', role: 'USER', groupIds: ['editors'] } as any;
@@ -84,7 +85,7 @@ describe('GenerationsController retry', () => {
 
     const result = await controller.reuse(user, 'job-1');
 
-    expect(result).toMatchObject({ prompt: 'combine these images', modelId: 'model-1', modelDisplayName: 'Editor', mode: 'IMAGE_EDIT', size: '1536x1024', quality: 'high', count: 2, requiresMaskRedraw: false });
+    expect(result).toMatchObject({ prompt: 'combine these images', modelId: 'model-1', modelDisplayName: 'Editor', mode: 'IMAGE_EDIT', size: '1536x1024', quality: 'high', count: 2, requiresMaskRedraw: false, stylePresetId: null });
     expect(result.sourceAssets.map(({ id }) => id)).toEqual(['source-2', 'source-1']);
     expect(result.sourceAssets[0]).toMatchObject({ visibility: 'owned', note: 'ref', generationPrompt: 'source prompt' });
     expect(JSON.stringify(result)).not.toMatch(/secret-model|secret-provider/);
@@ -126,7 +127,8 @@ describe('GenerationsController retry', () => {
     await createController.create(user, { modelId, prompt: '  combine these images  ', mode: 'IMAGE_EDIT', sourceAssetIds: [sourceId, sourceId] });
 
     expect(transaction.promptEntry.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      where: { userId_prompt: { userId: 'user-1', prompt: 'combine these images' } },
+      where: { userId_promptHash: { userId: 'user-1', promptHash: expect.stringMatching(/^[0-9a-f]{64}$/) } },
+      create: expect.objectContaining({ prompt: 'combine these images', promptHash: expect.stringMatching(/^[0-9a-f]{64}$/) }),
     }));
     expect(transaction.generationJob.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ imageCount: 1, parameters: expect.objectContaining({ sourceAssetIds: [sourceId] }) }) }));
     expect(createQuota.reserveJobInTransaction).toHaveBeenCalledWith(transaction, user, 1, expect.objectContaining({ jobId: 'job-1', kind: 'SUBMIT', imageCount: 1, videoSeconds: 0 }));
@@ -224,6 +226,79 @@ describe('GenerationsController retry', () => {
     expect(conversationTitleFromPrompt('短题')).toBe('短题');
     expect(conversationTitleFromPrompt('a cinematic wide shot of neon rain')).toBe('a cinematic wide shot');
     expect(conversationTitleFromPrompt('combine these images')).toBe('combine these images');
+    expect(conversationTitleFromPrompt('', '水彩绘本')).toBe('水彩绘本转绘');
+    expect(conversationTitleFromPrompt('   ')).toBe('新创作');
+  });
+
+  function imageCreateSetup(overrides: Record<string, unknown> = {}) {
+    const modelId = '11111111-1111-4111-8111-111111111111';
+    const transaction: any = {
+      conversation: { create: jest.fn().mockResolvedValue({ id: 'conversation-1' }) },
+      promptEntry: { upsert: jest.fn().mockResolvedValue({}) },
+      generationJob: { create: jest.fn().mockResolvedValue({ id: 'job-1', status: 'QUEUED' }) },
+      asset: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
+    };
+    const createPrisma: any = {
+      model: { findFirst: jest.fn().mockResolvedValue({
+        id: modelId, enabled: true, mediaKind: 'IMAGE', supportsGeneration: true, supportsEdit: true, supportsInpaint: true,
+        resolutionTiers: [{ label: '1K', shortEdge: 1024 }], allowedRatios: ['1:1'], allowedQualities: ['standard'],
+        maxImages: 1, maxInputImages: 2, defaults: { size: '1024x1024', quality: 'standard', count: 1 }, costPerUnit: 1, provider: { name: 'provider' },
+        ...overrides,
+      }) },
+      stylePreset: { findUnique: jest.fn(async ({ where }: { where: { id: string } }) => STYLE_PRESETS.find((item) => item.id === where.id) ?? null) },
+      asset: { findMany: jest.fn().mockResolvedValue([]) },
+      conversation: { update: jest.fn().mockResolvedValue({}) },
+      $transaction: jest.fn((callback: any) => callback(transaction)),
+    };
+    const createQuota: any = { reserveJobInTransaction: jest.fn().mockResolvedValue(undefined) };
+    return { modelId, transaction, createPrisma, controller: new GenerationsController(createPrisma, queue, queue, limits, createQuota, assets, lifecycle, events) };
+  }
+
+  it('stores a style preset id without rewriting the user prompt', async () => {
+    const { modelId, transaction, controller } = imageCreateSetup();
+    await controller.create(user, { modelId, prompt: '一只橘猫', stylePresetId: 'cinematic' });
+    expect(transaction.generationJob.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        prompt: '一只橘猫',
+        parameters: expect.objectContaining({
+          stylePresetId: 'cinematic',
+          styleSuffix: STYLE_PRESETS.find((item) => item.id === 'cinematic')!.suffix,
+        }),
+      }),
+    }));
+    expect(transaction.promptEntry.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { userId_promptHash: { userId: 'user-1', promptHash: expect.stringMatching(/^[0-9a-f]{64}$/) } },
+    }));
+  });
+
+  it('allows empty image-edit prompts when a style preset is selected', async () => {
+    const sourceId = '22222222-2222-4222-8222-222222222222';
+    const { modelId, transaction, createPrisma, controller } = imageCreateSetup();
+    createPrisma.asset.findMany.mockResolvedValue([{ id: sourceId }]);
+    await controller.create(user, { modelId, prompt: '', mode: 'IMAGE_EDIT', sourceAssetIds: [sourceId], stylePresetId: 'figurine' });
+    expect(transaction.promptEntry.upsert).not.toHaveBeenCalled();
+    expect(transaction.conversation.create).toHaveBeenCalledWith({ data: { userId: 'user-1', title: '3D 手办转绘' } });
+    expect(transaction.generationJob.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ prompt: '', parameters: expect.objectContaining({ stylePresetId: 'figurine' }) }),
+    }));
+  });
+
+  it('rejects unknown style presets and presets on unsupported modes', async () => {
+    const { modelId, controller } = imageCreateSetup();
+    await expect(controller.create(user, { modelId, prompt: '一只橘猫', stylePresetId: 'ghibli' })).rejects.toThrow('风格预设无效');
+    await expect(controller.create(user, { modelId, prompt: '一只橘猫', mode: 'INPAINT', stylePresetId: 'cinematic' })).rejects.toThrow('当前模式不支持风格预设');
+    await expect(controller.create(user, { modelId, prompt: '', mode: 'TEXT_TO_IMAGE' })).rejects.toThrow('提示词长度必须为 1-8000 字符');
+  });
+
+  it('returns the stored style preset on reuse', async () => {
+    prisma.generationJob.findFirst.mockResolvedValue({
+      modelId: 'model-1', mode: 'TEXT_TO_IMAGE', prompt: '一只橘猫',
+      parameters: { size: '1024x1024', quality: 'standard', count: 1, stylePresetId: 'storybook' },
+      modelSnapshot: { displayName: 'Painter' },
+    });
+    prisma.asset.findMany.mockResolvedValue([]);
+    const result = await controller.reuse(user, 'job-1');
+    expect(result).toMatchObject({ prompt: '一只橘猫', stylePresetId: 'storybook' });
   });
 
   it('requires every original reference to still exist before reuse', async () => {

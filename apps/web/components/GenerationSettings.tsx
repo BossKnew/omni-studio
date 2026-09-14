@@ -49,7 +49,7 @@ export default function GenerationSettings({
 }: GenerationSettingsProps) {
   const { t, locale } = useI18n();
   const labelOf = (value: string) => optionLabelFor(optionLabels, value, locale);
-  const durationLabel = (value: number) => optionLabelFor(optionLabels, `${value}s`, locale) === `${value}s` ? `${value}s` : optionLabelFor(optionLabels, `${value}s`, locale);
+  const durationLabel = (value: number) => labelOf(`${value}s`);
   const [open, setOpen] = useState(false);
   const [popoverStyle, setPopoverStyle] = useState<CSSProperties>({});
   const rootRef = useRef<HTMLDivElement>(null);

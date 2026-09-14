@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import type { Asset, ConversationDetail, GenerationJob } from '@/lib/studio-types';
 import type { DownloadResult } from '@/lib/download';
 import { useI18n } from '@/lib/i18n';
@@ -16,7 +16,7 @@ type JobHistoryProps = {
   onDownloadConversation: (conversationId: string) => Promise<DownloadResult>;
 };
 
-export default function JobHistory({ conversation, onLoadOlder, referenceIds, onDeleteConversation, onUseAsReference, onOpenImage, onRetry, onReuse, onDownloadConversation }: JobHistoryProps) {
+function JobHistory({ conversation, onLoadOlder, referenceIds, onDeleteConversation, onUseAsReference, onOpenImage, onRetry, onReuse, onDownloadConversation }: JobHistoryProps) {
   const { t } = useI18n();
   const [retryingJobId, setRetryingJobId] = useState('');
   const [retryErrors, setRetryErrors] = useState<Record<string, string>>({});
@@ -89,12 +89,14 @@ export default function JobHistory({ conversation, onLoadOlder, referenceIds, on
         const referenceAsset: Asset = { ...jobAsset, contentUrl: jobAsset.contentUrl, role: 'OUTPUT', note: jobAsset.note ?? null, generationPrompt: job.prompt };
         const selected = referenceIds.includes(jobAsset.id);
         return <div className={'image-card job-image-card ' + (selected ? 'selected-reference' : '')} key={jobAsset.id}>
-          <button className="image-thumbnail" type="button" onClick={() => onOpenImage(referenceAsset)} aria-label={jobAsset.mediaKind === 'VIDEO' || jobAsset.mimeType === 'video/mp4' ? t('播放生成视频') : t('放大查看生成图片')}>
-            <img src={jobAsset.thumbnailUrl ?? jobAsset.contentUrl} loading="lazy" decoding="async" alt={job.prompt} />
-            {(jobAsset.mediaKind === 'VIDEO' || jobAsset.mimeType === 'video/mp4') && <Icon className="video-play-badge" name="play" />}
-            <span className="image-expand" aria-hidden="true">{jobAsset.mediaKind === 'VIDEO' || jobAsset.mimeType === 'video/mp4' ? t('播放') : t('放大')}</span>
+          <button className="image-thumbnail" type="button" onClick={() => onOpenImage(referenceAsset)} aria-label={jobAsset.mediaKind === 'VIDEO' ? t('播放生成视频') : t('放大查看生成图片')}>
+            {jobAsset.thumbnailUrl
+              ? <img src={jobAsset.thumbnailUrl} width={jobAsset.thumbnailWidth ?? undefined} height={jobAsset.thumbnailHeight ?? undefined} loading="lazy" decoding="async" alt={job.prompt} />
+              : <span className="image-preview-missing">{t('暂无预览')}</span>}
+            {jobAsset.mediaKind === 'VIDEO' && <Icon className="video-play-badge" name="play" />}
+            <span className="image-expand" aria-hidden="true">{jobAsset.mediaKind === 'VIDEO' ? t('播放') : t('放大')}</span>
           </button>
-          {jobAsset.mediaKind === 'VIDEO' || jobAsset.mimeType === 'video/mp4' ? null : <button className="button reference-button" type="button" onClick={() => onUseAsReference(referenceAsset, job.prompt)}>{selected ? t('已选为参考图') : t('设为参考图')}</button>}
+          {jobAsset.mediaKind === 'VIDEO' ? null : <button className="button reference-button" type="button" onClick={() => onUseAsReference(referenceAsset, job.prompt)}>{selected ? t('已选为参考图') : t('设为参考图')}</button>}
         </div>;
       })}{Array.from({ length: legacyDeletedAssetCount(job) }, (_, index) => <DeletedAssetPlaceholder key={'legacy-deleted-' + index} />)}</div>
     </article>)}
@@ -120,3 +122,5 @@ function DeletedAssetPlaceholder() {
   const { t } = useI18n();
   return <div className="deleted-asset-placeholder" role="status"><Icon name="image" /><strong>{t('已在资产库中删除')}</strong></div>;
 }
+
+export default memo(JobHistory);

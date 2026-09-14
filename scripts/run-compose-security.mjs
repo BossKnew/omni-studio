@@ -32,5 +32,6 @@ function check(json, mode) {
 }
 
 check(composeJson(['--env-file', '.env.example']), 'base');
+check(composeJson(['--env-file', '.env.example', '-f', 'docker-compose.yml', '-f', 'compose.worker.yml']), 'base');
 check(composeJson(['--env-file', '.env.example', '-f', 'docker-compose.yml', '-f', 'compose.traefik.yml']), 'traefik');
 check(composeJson(['-f', 'deploy/traefik-compose.yml.example']), 'standalone');

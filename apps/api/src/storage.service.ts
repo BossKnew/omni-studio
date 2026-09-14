@@ -3,16 +3,19 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, open, rename, rm, stat } from 'node:fs/promises';
+import { copyFile, mkdir, open, rename, rm, stat } from 'node:fs/promises';
 import { dirname, extname, resolve, sep } from 'node:path';
 import sharp from 'sharp';
 import { ConcurrencyGate } from './concurrency-gate';
+import { mediaStagingDirName } from './process-role';
 import { securityConfig } from './security-config';
-import { MAX_IMAGE_BYTES, MAX_VIDEO_BYTES, THUMBNAIL_MAX_EDGE, THUMBNAIL_QUALITY } from './domain-constants';
+import { MAX_IMAGE_BYTES, MAX_IMAGE_EDGE, MAX_VIDEO_BYTES, THUMBNAIL_MAX_EDGE, THUMBNAIL_QUALITY } from './domain-constants';
 
 const execFileAsync = promisify(execFile);
 
-const MAX_IMAGE_PIXELS = 8192 * 8192;
+const MAX_IMAGE_PIXELS = MAX_IMAGE_EDGE * MAX_IMAGE_EDGE;
+const DOWNSIZE_QUALITY = 82;
+const COMPACT_QUALITY = 70;
 
 const MIME_EXT: Record<string, string> = {
   'image/png': '.png',
@@ -27,7 +30,7 @@ sharp.concurrency(1);
 @Injectable()
 export class StorageService implements OnModuleInit {
   readonly root = resolve(process.env.MEDIA_ROOT ?? resolve(process.cwd(), 'media'));
-  readonly stagingRoot = resolve(this.root, '.staging');
+  readonly stagingRoot = resolve(this.root, mediaStagingDirName());
   private readonly imageProcessing = new ConcurrencyGate(securityConfig.imageProcessingConcurrency());
 
   async onModuleInit() {
@@ -46,22 +49,67 @@ export class StorageService implements OnModuleInit {
     return this.imageProcessing.run(() => this.inspectImageFileUnlocked(path, claimedMime));
   }
 
-  async normalizeImageFile(inputPath: string, claimedMime?: string) {
+  async inspectImageWithThumbnail(path: string, claimedMime?: string) {
+    this.assertStagingPath(path);
+    return this.imageProcessing.run(async () => {
+      const pipeline = this.sharpImage(path);
+      const inspected = await this.inspectSharp(pipeline, claimedMime);
+      const file = await stat(path);
+      if (file.size > MAX_IMAGE_BYTES) throw new Error('图片不能超过 20 MiB');
+      const thumbnail = await this.writeThumbnailFrom(pipeline);
+      return { path, sizeBytes: BigInt(file.size), mimeType: inspected.mimeType, width: inspected.width, height: inspected.height, thumbnail };
+    });
+  }
+
+  async normalizeImageFile(inputPath: string, claimedMime?: string, options?: { thumbnail?: boolean; maxLongEdge?: number; mask?: boolean }) {
     this.assertStagingPath(inputPath);
     return this.imageProcessing.run(async () => {
-      const inspected = await this.inspectImageFileUnlocked(inputPath, claimedMime);
+      const pipeline = this.sharpImage(inputPath);
+      const inspected = await this.inspectSharp(pipeline, claimedMime);
+      const file = await stat(inputPath);
+      if (file.size > MAX_IMAGE_BYTES) throw new Error('图片不能超过 20 MiB');
+      const maxLongEdge = resizeLongEdge(options?.maxLongEdge);
+      const needsDownscale = maxLongEdge != null && Math.max(inspected.width, inspected.height) > maxLongEdge;
       const outputPath = await this.createStagingPath(MIME_EXT[inspected.mimeType]);
-      let pipeline = sharp(inputPath, { limitInputPixels: MAX_IMAGE_PIXELS, sequentialRead: true }).rotate();
-      if (inspected.mimeType === 'image/jpeg') pipeline = pipeline.jpeg({ quality: 95, mozjpeg: true });
-      else if (inspected.mimeType === 'image/png') pipeline = pipeline.png({ compressionLevel: 9 });
-      else pipeline = pipeline.webp({ quality: 95 });
+      let thumbnail: Awaited<ReturnType<StorageService['writeThumbnailFrom']>> | undefined;
       try {
-        const info = await pipeline.toFile(outputPath);
-        const file = await stat(outputPath);
-        if (file.size > MAX_IMAGE_BYTES) throw new Error('规范化后的图片不能超过 20 MiB');
-        return { path: outputPath, sizeBytes: BigInt(file.size), mimeType: inspected.mimeType, width: info.width, height: info.height };
+        if (options?.thumbnail !== false) thumbnail = await this.writeThumbnailFrom(pipeline);
+        if (!needsReencode(inspected.orientation) && !needsDownscale) {
+          await copyFile(inputPath, outputPath);
+          return {
+            path: outputPath,
+            sizeBytes: BigInt(file.size),
+            mimeType: inspected.mimeType,
+            width: inspected.width,
+            height: inspected.height,
+            thumbnail,
+          };
+        }
+        const encode = (image: ReturnType<typeof sharp>, quality: 'normal' | 'compact') => encodeNormalized(image, inspected.mimeType, {
+          maxLongEdge: needsDownscale ? maxLongEdge : undefined,
+          mask: options?.mask,
+          quality,
+        });
+        let info = await encode(pipeline, 'normal').toFile(outputPath);
+        let written = await stat(outputPath);
+        if (written.size > MAX_IMAGE_BYTES) {
+          info = await encode(this.sharpImage(inputPath), 'compact').toFile(outputPath);
+          written = await stat(outputPath);
+        }
+        if (written.size > MAX_IMAGE_BYTES) throw new Error('规范化后的图片不能超过 20 MiB');
+        return {
+          path: outputPath,
+          sizeBytes: BigInt(written.size),
+          mimeType: inspected.mimeType,
+          width: info.width,
+          height: info.height,
+          thumbnail,
+        };
       } catch (error) {
-        await this.deleteStaged(outputPath);
+        await Promise.all([
+          this.deleteStaged(outputPath).catch(() => undefined),
+          thumbnail ? this.deleteStaged(thumbnail.path).catch(() => undefined) : Promise.resolve(),
+        ]);
         throw error;
       }
     });
@@ -100,7 +148,11 @@ export class StorageService implements OnModuleInit {
     this.assertStagingPath(inputPath);
     const framePath = await this.createStagingPath('.jpg');
     try {
-      await execFileAsync('ffmpeg', ['-y', '-ss', '0', '-i', inputPath, '-frames:v', '1', '-q:v', '3', framePath], { timeout: 30_000, maxBuffer: 1024 * 1024 });
+      await execFileAsync('ffmpeg', [
+        '-y', '-ss', '0', '-i', inputPath, '-an', '-frames:v', '1',
+        '-vf', `scale=${THUMBNAIL_MAX_EDGE}:${THUMBNAIL_MAX_EDGE}:force_original_aspect_ratio=decrease`,
+        '-q:v', '5', framePath,
+      ], { timeout: 30_000, maxBuffer: 1024 * 1024 });
       return await this.imageProcessing.run(() => this.createThumbnailUnlocked(framePath));
     } finally {
       await this.deleteStaged(framePath).catch(() => undefined);
@@ -128,11 +180,41 @@ export class StorageService implements OnModuleInit {
     this.assertStagingPath(stagedPath);
     const ext = MIME_EXT[mimeType] ?? extname(mimeType);
     const objectKey = `${userId}/${randomUUID()}${ext}`;
+    return this.saveStagedKey(objectKey, stagedPath);
+  }
+
+  async saveStagedKey(objectKey: string, stagedPath: string) {
+    this.assertStagingPath(stagedPath);
+    if (!/^[a-z0-9][a-z0-9/_-]*\.[a-z0-9]+$/i.test(objectKey)) throw new Error('非法对象键');
     const fullPath = this.resolveKey(objectKey);
     await mkdir(dirname(fullPath), { recursive: true });
+    await rm(fullPath, { force: true });
     await rename(stagedPath, fullPath);
     const file = await stat(fullPath);
     return { objectKey, sizeBytes: BigInt(file.size) };
+  }
+
+  async objectSize(objectKey: string) {
+    return (await stat(this.resolveKey(objectKey))).size;
+  }
+
+  async createStylePresetPreviewFile(inputPath: string) {
+    this.assertStagingPath(inputPath);
+    return this.imageProcessing.run(async () => {
+      const outputPath = await this.createStagingPath('.webp');
+      try {
+        const info = await sharp(inputPath, { limitInputPixels: MAX_IMAGE_PIXELS, sequentialRead: true })
+          .rotate()
+          .resize({ width: THUMBNAIL_MAX_EDGE, height: THUMBNAIL_MAX_EDGE, fit: 'cover' })
+          .webp({ quality: THUMBNAIL_QUALITY, effort: 2 })
+          .toFile(outputPath);
+        const file = await stat(outputPath);
+        return { path: outputPath, sizeBytes: BigInt(file.size), mimeType: 'image/webp' as const, width: info.width, height: info.height };
+      } catch (error) {
+        await this.deleteStaged(outputPath);
+        throw error;
+      }
+    });
   }
 
   filePath(objectKey: string) { return this.resolveKey(objectKey); }
@@ -153,34 +235,44 @@ export class StorageService implements OnModuleInit {
 
   async deleteUser(userId: string) {
     const path = resolve(this.root, userId);
-    if (!path.startsWith(`${this.root}${sep}`) || path === this.stagingRoot) throw new Error('非法存储路径');
+    if (!path.startsWith(`${this.root}${sep}`) || path === this.stagingRoot || isStagingObjectPath(this.root, path)) throw new Error('非法存储路径');
     await rm(path, { recursive: true, force: true });
+  }
+
+  private sharpImage(path: string) {
+    return sharp(path, { limitInputPixels: MAX_IMAGE_PIXELS, sequentialRead: true });
   }
 
   private async inspectSharp(image: ReturnType<typeof sharp>, claimedMime?: string) {
     const meta = await image.metadata();
     const mime = meta.format === 'jpeg' ? 'image/jpeg' : `image/${meta.format}`;
     if (!MIME_EXT[mime] || (claimedMime && claimedMime !== mime)) throw new Error('仅支持 PNG、JPEG 和 WebP 图片');
-    if (!meta.width || !meta.height || meta.width > 8192 || meta.height > 8192) throw new Error('图片尺寸无效或超过 8192 像素');
-    return { mimeType: mime, width: meta.width, height: meta.height };
+    if (!meta.width || !meta.height || meta.width > MAX_IMAGE_EDGE || meta.height > MAX_IMAGE_EDGE) throw new Error('图片尺寸无效或超过 8192 像素');
+    return { mimeType: mime, width: meta.width, height: meta.height, orientation: meta.orientation };
   }
 
   private async inspectImageFileUnlocked(path: string, claimedMime?: string) {
     const file = await stat(path);
     if (file.size > MAX_IMAGE_BYTES) throw new Error('图片不能超过 20 MiB');
-    return this.inspectSharp(sharp(path, { limitInputPixels: MAX_IMAGE_PIXELS, sequentialRead: true }), claimedMime);
+    const meta = await this.inspectSharp(this.sharpImage(path), claimedMime);
+    return { path, sizeBytes: BigInt(file.size), mimeType: meta.mimeType, width: meta.width, height: meta.height };
   }
 
   private async createThumbnailUnlocked(inputPath: string) {
+    return this.writeThumbnailFrom(this.sharpImage(inputPath));
+  }
+
+  private async writeThumbnailFrom(image: ReturnType<typeof sharp>) {
     const outputPath = await this.createStagingPath('.webp');
     try {
-      const info = await sharp(inputPath, { limitInputPixels: MAX_IMAGE_PIXELS, sequentialRead: true })
+      const info = await image
+        .clone()
         .rotate()
         .resize({ width: THUMBNAIL_MAX_EDGE, height: THUMBNAIL_MAX_EDGE, fit: 'inside', withoutEnlargement: true })
-        .webp({ quality: THUMBNAIL_QUALITY, effort: 4 })
+        .webp({ quality: THUMBNAIL_QUALITY, effort: 2 })
         .toFile(outputPath);
       const file = await stat(outputPath);
-      return { path: outputPath, sizeBytes: BigInt(file.size), mimeType: 'image/webp', width: info.width, height: info.height };
+      return { path: outputPath, sizeBytes: BigInt(file.size), mimeType: 'image/webp' as const, width: info.width, height: info.height };
     } catch (error) {
       await this.deleteStaged(outputPath);
       throw error;
@@ -194,7 +286,7 @@ export class StorageService implements OnModuleInit {
 
   private resolveKey(objectKey: string) {
     const path = resolve(this.root, objectKey);
-    if (!path.startsWith(`${this.root}${sep}`) || path.startsWith(`${this.stagingRoot}${sep}`)) throw new Error('非法对象键');
+    if (!path.startsWith(`${this.root}${sep}`) || isStagingObjectPath(this.root, path)) throw new Error('非法对象键');
     return path;
   }
 
@@ -230,6 +322,41 @@ export function videoInfoFromFfprobe(payload: unknown) {
   const duration = Number(format?.duration ?? video?.duration);
   const durationMs = Number.isFinite(duration) && duration > 0 ? Math.round(duration * 1000) : null;
   return { width, height, durationMs };
+}
+
+function isStagingObjectPath(root: string, path: string) {
+  const relative = path.slice(root.length).replaceAll('\\', '/').replace(/^\//, '');
+  return relative === '.staging' || relative.startsWith('.staging/') || relative.startsWith('.staging-');
+}
+
+function needsReencode(orientation?: number) {
+  return Boolean(orientation && orientation !== 1);
+}
+
+function resizeLongEdge(value?: number) {
+  if (!Number.isInteger(value) || value == null || value < 1) return undefined;
+  return Math.min(value, MAX_IMAGE_EDGE);
+}
+
+function encodeNormalized(
+  image: ReturnType<typeof sharp>,
+  mimeType: string,
+  options: { maxLongEdge?: number; mask?: boolean; quality: 'normal' | 'compact' },
+) {
+  let output = image.rotate();
+  if (options.maxLongEdge) {
+    output = output.resize({
+      width: options.maxLongEdge,
+      height: options.maxLongEdge,
+      fit: 'inside',
+      withoutEnlargement: true,
+      kernel: options.mask ? 'nearest' : 'lanczos3',
+    });
+  }
+  const quality = options.quality === 'compact' ? COMPACT_QUALITY : options.maxLongEdge ? DOWNSIZE_QUALITY : 90;
+  if (mimeType === 'image/jpeg') return output.jpeg({ quality });
+  if (mimeType === 'image/png') return output.png({ compressionLevel: options.quality === 'compact' ? 9 : 6 });
+  return output.webp({ quality, effort: 2 });
 }
 
 async function probeVideo(path: string) {

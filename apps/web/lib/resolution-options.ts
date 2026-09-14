@@ -11,13 +11,6 @@ export type ResolutionMatrix = {
   partsOf(size: string): ResolutionEntry | null;         // 按 size 字符串查 entry
 };
 
-export const DEFAULT_IMAGE_TIERS: ResolutionTier[] = [
-  { label: '1K', shortEdge: 1024 },
-  { label: '2K', shortEdge: 1440 },
-  { label: '4K', shortEdge: 2160 },
-];
-export const DEFAULT_IMAGE_RATIOS = ['1:1', '3:2', '2:3', '16:9'];
-
 export function parseSize(value: string): ParsedSize | null {
   const match = /^(\d{1,5})x(\d{1,5})$/i.exec(value.trim());
   if (!match) return null;

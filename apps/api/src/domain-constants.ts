@@ -1,8 +1,15 @@
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+export const MAX_IMAGE_EDGE = 8192;
 export const MAX_VIDEO_BYTES = 256 * 1024 * 1024;
-export const THUMBNAIL_MAX_EDGE = 512;
+export const THUMBNAIL_MAX_EDGE = 384;
 export const THUMBNAIL_QUALITY = 82;
 export const VIDEO_POLL_INTERVAL_MS = 3_000;
+export const POLL_DELAYS_MS = [1_000, 2_000, 5_000, 10_000] as const;
+
+export function pollDelayMs(attempt: number) {
+  const index = Number.isFinite(attempt) ? Math.min(Math.max(Math.trunc(attempt), 0), POLL_DELAYS_MS.length - 1) : 0;
+  return POLL_DELAYS_MS[index];
+}
 export const VIDEO_LOCK_DURATION_MS = 75 * 60 * 1000;
 export const IMAGE_LOCK_DURATION_MS = VIDEO_LOCK_DURATION_MS;
 
@@ -14,7 +21,6 @@ export type VideoAdapterKind = (typeof VIDEO_ADAPTER_KINDS)[number];
 export const PROVIDER_ADAPTER_KINDS = [...IMAGE_ADAPTER_KINDS, ...VIDEO_ADAPTER_KINDS] as const;
 export type ProviderAdapterKind = (typeof PROVIDER_ADAPTER_KINDS)[number];
 
-export const IMAGE_GENERATION_MODES = ['TEXT_TO_IMAGE', 'IMAGE_EDIT', 'INPAINT'] as const;
 export const VIDEO_GENERATION_MODES = ['TEXT_TO_VIDEO', 'IMAGE_TO_VIDEO', 'FIRST_LAST_FRAME_TO_VIDEO'] as const;
 export type VideoGenerationMode = (typeof VIDEO_GENERATION_MODES)[number];
 

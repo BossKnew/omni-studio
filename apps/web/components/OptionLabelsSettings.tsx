@@ -29,10 +29,10 @@ export default function OptionLabelsSettings({ onNotice, onError }: OptionLabels
 
   async function suggestFromModels() {
     try {
-      const models = await api<Array<{ allowedSizes: string[]; allowedQualities: string[]; resolutionTiers?: ResolutionTier[]; allowedRatios?: string[] }>>('/admin/models');
+      const models = await api<Array<{ allowedSizes: string[]; allowedQualities: string[]; resolutionTiers: ResolutionTier[]; allowedRatios: string[] }>>('/admin/models');
       const existing = new Set(rows.map((row) => row.value.trim()).filter(Boolean));
       const extras = [...new Set(models.flatMap((model) => {
-        const sizes = model.allowedSizes.length ? model.allowedSizes : (buildResolutionMatrix(model.resolutionTiers ?? [], model.allowedRatios ?? [])?.entries.map((entry) => entry.size) ?? []);
+        const sizes = model.allowedSizes.length ? model.allowedSizes : (buildResolutionMatrix(model.resolutionTiers, model.allowedRatios)?.entries.map((entry) => entry.size) ?? []);
         return [...sizes, ...model.allowedQualities];
       }))]
         .filter((value) => value && !existing.has(value))

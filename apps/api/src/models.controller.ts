@@ -1,17 +1,17 @@
-import { BadRequestException, Body, ConflictException, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post } from '@nestjs/common';
+import { BadRequestException, Body, ConflictException, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Req, Res } from '@nestjs/common';
+import type { Request, Response } from 'express';
 import { CurrentUser, Roles, type AuthUser } from './common';
 import { PrismaService } from './prisma.service';
 import { parseBody, safeText, uuidSchema } from './validation';
 import { z } from 'zod';
 import { accessibleModelWhere } from './model-access';
 import { Prisma } from './generated/prisma/client';
-import { ACTIVE_JOB_STATUSES, isProviderAdapterKind, mediaKindForAdapter, PROVIDER_ADAPTER_KINDS } from './domain-constants';
-import { normalizeAdapterKind } from './provider-adapter';
+import { ACTIVE_JOB_STATUSES, mediaKindForAdapter, PROVIDER_ADAPTER_KINDS } from './domain-constants';
 import { cleanImageRatios, cleanImageTiers, computeImageSize, DEFAULT_IMAGE_RATIOS, DEFAULT_IMAGE_TIERS, imageSizeAllowed } from './resolution';
 import { MAX_POINT_MULTIPLIER } from './generation-quota';
+import { applyPrivateCatalogCache, catalogEtag } from './cache-policy';
 
 const defaults = { size: 'auto', quality: 'standard', count: 1 };
-const sizes = ['auto'];
 const qualities = ['standard'];
 const optionValueSchema = z.string().trim().min(1).max(64);
 const sizeOptionSchema = z.array(optionValueSchema).max(20);
@@ -44,12 +44,14 @@ export class ModelsController {
   constructor(private prisma: PrismaService) {}
 
   @Get('models')
-  async publicModels(@CurrentUser() user: AuthUser) {
-    return this.prisma.model.findMany({
+  async publicModels(@CurrentUser() user: AuthUser, @Req() request?: Request, @Res({ passthrough: true }) response?: Response) {
+    const models = await this.prisma.model.findMany({
       where: { enabled: true, provider: { enabled: true, archivedAt: null }, ...accessibleModelWhere(user) },
       orderBy: [{ sortOrder: 'asc' }, { displayName: 'asc' }],
       select: { id: true, displayName: true, mediaKind: true, supportsGeneration: true, supportsEdit: true, supportsInpaint: true, supportsFirstLastFrame: true, allowedSizes: true, allowedQualities: true, allowedDurations: true, resolutionTiers: true, allowedRatios: true, maxImages: true, maxInputImages: true, defaults: true, costPerUnit: true, pointMultipliers: true },
     });
+    if (applyPrivateCatalogCache(request, response, catalogEtag(user.id, user.groupIds, models))) return;
+    return models;
   }
 
   @Roles('ADMIN') @Get('admin/models')
@@ -72,7 +74,6 @@ export class ModelsController {
     const current = await this.prisma.model.findUniqueOrThrow({ where: { id } });
     // 库里的 mediaKind 由适配器推导；显式覆盖，避免只改 adapterKind 时被旧值误判为不匹配
     const merged = { ...current, ...body, mediaKind: body.mediaKind } as ModelInput;
-    this.validate(merged);
     if (body.allowedGroupIds) await this.assertGroupsExist(body.allowedGroupIds);
     const model = await this.prisma.model.update({ where: { id }, data: {
       ...await this.data(merged),
@@ -93,16 +94,10 @@ export class ModelsController {
     });
   }
 
-  private validate(body: ModelInput) {
-    if (!body.providerId || !String(body.displayName ?? '').trim() || !String(body.upstreamModelId ?? '').trim()) throw new BadRequestException('供应商、显示名称和模型 ID 必填');
-    if (!Array.isArray(body.allowedSizes ?? sizes) || !Array.isArray(body.allowedQualities ?? qualities)) throw new BadRequestException('尺寸和质量必须为数组');
-  }
-
   private async data(body: ModelInput) {
     const provider = await this.prisma.provider.findUnique({ where: { id: body.providerId }, select: { id: true } });
     if (!provider) throw new BadRequestException('供应商不存在');
-    const adapterKind = normalizeAdapterKind(body.adapterKind);
-    if (!isProviderAdapterKind(adapterKind)) throw new BadRequestException('未知适配器类型');
+    const adapterKind = body.adapterKind;
     const mediaKind = mediaKindForAdapter(adapterKind);
     if (body.mediaKind && body.mediaKind !== mediaKind) throw new BadRequestException('模型类型与适配器类型不匹配');
     const video = mediaKind === 'VIDEO';
@@ -114,12 +109,11 @@ export class ModelsController {
       return cleaned.length ? cleaned : (video ? [] : DEFAULT_IMAGE_TIERS);
     })();
     const tierLabels = resolutionTiers.map((tier) => tier.label);
-    const requestedQualities = Array.isArray(body.allowedQualities) ? body.allowedQualities : (video ? [] : qualities);
+    const requestedQualities = body.allowedQualities ?? (video ? [] : qualities);
     // 视频模型的分辨率即档位名称（如 720P / 1080P），直接派生于档位
     const allowedQualities = video && resolutionTiers.length ? tierLabels : requestedQualities;
     if (!video && !allowedQualities.length) throw new BadRequestException('质量必须为数组');
     const allowedDurations = video ? uniqueDurations(body.allowedDurations) : [];
-    if (video && !allowedDurations.length) throw new BadRequestException('视频模型必须配置至少一种时长');
     const allowedRatios = video ? [] : (() => {
       const cleaned = cleanImageRatios(body.allowedRatios) ?? [];
       return cleaned.length ? cleaned : DEFAULT_IMAGE_RATIOS;
@@ -131,8 +125,8 @@ export class ModelsController {
     const defaultQuality = allowedQualities.length
       ? (typeof requestedDefaults.quality === 'string' && allowedQualities.includes(requestedDefaults.quality) ? requestedDefaults.quality : allowedQualities[0])
       : undefined;
-    const maxImages = video ? 1 : Math.min(4, Math.max(1, Number(body.maxImages) || 1));
-    const defaultCount = video ? 1 : Math.min(maxImages, Math.max(1, Number(requestedDefaults.count) || 1));
+    const maxImages = video ? 1 : (body.maxImages ?? 1);
+    const defaultCount = video ? 1 : Math.min(maxImages, typeof requestedDefaults.count === 'number' ? requestedDefaults.count : 1);
     const defaultDuration = video
       ? (typeof requestedDefaults.durationSeconds === 'number' && allowedDurations.includes(requestedDefaults.durationSeconds) ? requestedDefaults.durationSeconds : allowedDurations[0])
       : undefined;
@@ -143,10 +137,10 @@ export class ModelsController {
       supportsGeneration: body.supportsGeneration !== false, supportsEdit: Boolean(body.supportsEdit), supportsInpaint: adapterKind === 'openai-images' && Boolean(body.supportsInpaint),
       supportsFirstLastFrame,
       allowedSizes, allowedQualities, allowedDurations, resolutionTiers, allowedRatios,
-      maxImages, maxInputImages: Math.min(8, Math.max(supportsFirstLastFrame ? 2 : 1, Number(body.maxInputImages) || 1)),
+      maxImages, maxInputImages: Math.min(8, Math.max(supportsFirstLastFrame ? 2 : 1, body.maxInputImages ?? 1)),
       defaults: { ...requestedDefaults, size: defaultSize, ...(defaultQuality !== undefined ? { quality: defaultQuality } : { quality: undefined }), count: defaultCount, ...(defaultDuration !== undefined ? { durationSeconds: defaultDuration } : {}) },
-      enabled: body.enabled !== false, sortOrder: Number(body.sortOrder) || 0,
-      costPerUnit: Math.min(1000, Math.max(1, Number(body.costPerUnit) || 1)),
+      enabled: body.enabled !== false, sortOrder: body.sortOrder ?? 0,
+      costPerUnit: body.costPerUnit ?? 1,
       pointMultipliers: pointMultipliers === null ? Prisma.DbNull : pointMultipliers,
     };
   }

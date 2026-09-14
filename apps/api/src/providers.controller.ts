@@ -40,14 +40,7 @@ export class ProvidersController {
   constructor(
     private prisma: PrismaService,
     private crypto: CryptoService,
-    private http: SafeHttpService = {
-      validateBaseUrl: (value: unknown) => String(value).replace(/\/$/, ''),
-      request: async (url: string, init: any) => {
-        const response = await fetch(url, init);
-        const body = typeof (response as any).arrayBuffer === 'function' ? Buffer.from(await response.arrayBuffer()) : Buffer.from('{"data":[]}');
-        return { ok: response.ok, status: response.status, headers: response.headers ?? new Headers({ 'content-type': 'application/json' }), body, url };
-      },
-    } as any,
+    private http: SafeHttpService,
   ) {}
 
   @Get()
@@ -60,10 +53,10 @@ export class ProvidersController {
   async create(@CurrentUser() actor: AuthUser, @Body() raw: unknown) {
     const body = parseBody(providerCreateSchema, raw);
     const provider = await this.prisma.provider.create({ data: {
-      name: body.name.trim(), baseUrl: this.http.validateBaseUrl(body.baseUrl), encryptedApiKey: this.crypto.encrypt(body.apiKey),
+      name: body.name, baseUrl: this.http.validateBaseUrl(body.baseUrl), encryptedApiKey: this.crypto.encrypt(body.apiKey),
       encryptedHeaders: body.headers ? this.crypto.encrypt(JSON.stringify(normalizeProviderHeaders(body.headers))) : null,
-      timeoutSeconds: Math.min(3600, Math.max(10, Number(body.timeoutSeconds) || 180)),
-      pollTimeoutSeconds: Math.min(3600, Math.max(10, Number(body.pollTimeoutSeconds) || 900)),
+      timeoutSeconds: body.timeoutSeconds ?? 180,
+      pollTimeoutSeconds: body.pollTimeoutSeconds ?? 900,
       enabled: body.enabled !== false,
     }});
     await this.audit(actor.id, 'provider.created', provider.id);
@@ -74,7 +67,7 @@ export class ProvidersController {
   async update(@CurrentUser() actor: AuthUser, @Param('id', new ParseUUIDPipe({ version: '4' })) id: string, @Body() raw: unknown) {
     const body = parseBody(providerUpdateSchema, raw);
     await this.prisma.provider.update({ where: { id }, data: {
-      ...(body.name !== undefined ? { name: String(body.name).trim() } : {}),
+      ...(body.name !== undefined ? { name: body.name } : {}),
       ...(body.baseUrl !== undefined ? { baseUrl: this.http.validateBaseUrl(body.baseUrl) } : {}),
       ...(body.apiKey ? { encryptedApiKey: this.crypto.encrypt(body.apiKey) } : {}),
       ...(body.headers !== undefined ? { encryptedHeaders: body.headers ? this.crypto.encrypt(JSON.stringify(normalizeProviderHeaders(body.headers))) : null } : {}),

@@ -14,6 +14,7 @@ import { GenerationLifecycleService } from './generation-lifecycle.service';
 import { ACTIVE_JOB_STATUSES } from './domain-constants';
 import { cursorWhere, decodeCursor, encodeCursor, pageLimit } from './pagination';
 import { parseTrashRetention, trashRetentionFromSetting } from './trash-retention';
+import { parseUploadMaxLongEdge, UPLOAD_IMAGE_SETTING_KEY, uploadImagePolicyFromSetting } from './upload-image-policy';
 
 const registrationSchema = z.object({ enabled: z.boolean() }).strict();
 const statusSchema = z.object({ status: z.enum(['ACTIVE', 'DISABLED']) }).strict();
@@ -21,6 +22,7 @@ const resetSchema = z.object({ password: passwordSchema }).strict();
 const resetMfaSchema = z.object({ actorCode: z.string().regex(/^\d{6}$/) }).strict();
 const sessionDurationSchema = z.object({ duration: z.string().min(2).max(4) }).strict();
 const trashRetentionSchema = z.object({ duration: z.string().min(2).max(4) }).strict();
+const uploadImageSchema = z.object({ maxLongEdge: z.number() }).strict();
 const userGroupSchema = z.object({
   name: safeText(64),
   description: safeText(300).optional().nullable(),
@@ -49,12 +51,16 @@ export class AdminController {
 
   @Get('settings')
   async settings() {
-    const trashRow = await this.prisma.systemSetting.findUnique({ where: { key: 'trash_retention' } });
+    const [trashRow, uploadRow] = await Promise.all([
+      this.prisma.systemSetting.findUnique({ where: { key: 'trash_retention' } }),
+      this.prisma.systemSetting.findUnique({ where: { key: UPLOAD_IMAGE_SETTING_KEY } }),
+    ]);
     return {
       registrationEnabled: await this.auth.registrationEnabled(),
       userSessionDuration: await this.auth.userSessionDuration(),
       adminSessionDuration: '1d',
       trashRetention: trashRetentionFromSetting(trashRow?.value).value,
+      uploadMaxLongEdge: uploadImagePolicyFromSetting(uploadRow?.value).maxLongEdge,
     };
   }
 
@@ -91,6 +97,20 @@ export class AdminController {
     return { duration };
   }
 
+  @Patch('settings/upload-image')
+  async uploadImage(@CurrentUser() actor: AuthUser, @Body() raw: unknown) {
+    const body = parseBody(uploadImageSchema, raw);
+    let maxLongEdge: number;
+    try { maxLongEdge = parseUploadMaxLongEdge(body.maxLongEdge); }
+    catch (error) { throw new BadRequestException((error as Error).message); }
+    const value = { maxLongEdge };
+    await this.prisma.$transaction([
+      this.prisma.systemSetting.upsert({ where: { key: UPLOAD_IMAGE_SETTING_KEY }, create: { key: UPLOAD_IMAGE_SETTING_KEY, value }, update: { value } }),
+      this.prisma.auditLog.create({ data: { actorId: actor.id, action: 'upload-image.updated', targetType: 'setting', targetId: UPLOAD_IMAGE_SETTING_KEY, metadata: value } }),
+    ]);
+    return { maxLongEdge };
+  }
+
   @Get('users')
   async users(@Query('limit') rawLimit?: string, @Query('cursor') rawCursor?: string) {
     const limit = pageLimit(rawLimit, 50);
@@ -99,13 +119,13 @@ export class AdminController {
       where: cursorWhere('createdAt', cursor),
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: limit + 1,
-      select: { id: true, username: true, displayName: true, role: true, status: true, mustChangePwd: true, createdAt: true, updatedAt: true, usage: { select: { storageBytes: true } }, mfaCredential: { select: { userId: true } }, groupMemberships: { select: { group: { select: { id: true, name: true } } }, orderBy: { group: { name: 'asc' } } }, teamMemberships: { select: { team: { select: { id: true, name: true } } }, orderBy: { team: { name: 'asc' } } }, _count: { select: { jobs: true, conversations: true, assets: { where: { role: { in: ['UPLOAD', 'OUTPUT'] }, deletedAt: null } } } } },
+      select: { id: true, username: true, displayName: true, role: true, status: true, mustChangePwd: true, createdAt: true, updatedAt: true, usage: { select: { storageBytes: true } }, mfaCredential: { select: { userId: true } }, groupMemberships: { select: { group: { select: { id: true, name: true } } }, orderBy: { group: { name: 'asc' } } }, teamMemberships: { select: { team: { select: { id: true, name: true } } }, orderBy: { team: { name: 'asc' } } } },
     });
     const hasMore = users.length > limit;
     const page = users.slice(0, limit);
     const items = page.map((user) => {
       const { mfaCredential, groupMemberships, teamMemberships, usage, ...publicUser } = user;
-      return { ...publicUser, groups: groupMemberships?.map(({ group }) => group) ?? [], teams: teamMemberships?.map(({ team }) => team) ?? [], mfaEnabled: Boolean(mfaCredential), mfaRequired: user.role === 'ADMIN', storageBytes: usage?.storageBytes.toString() ?? '0' };
+      return { ...publicUser, groups: groupMemberships.map(({ group }) => group), teams: teamMemberships.map(({ team }) => team), mfaEnabled: Boolean(mfaCredential), mfaRequired: user.role === 'ADMIN', storageBytes: usage?.storageBytes.toString() ?? '0' };
     });
     const last = page.at(-1);
     return { items, nextCursor: hasMore && last ? encodeCursor(last.createdAt, last.id) : null };
