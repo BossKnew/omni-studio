@@ -10,7 +10,7 @@ x-app-hardening: &app-hardening
 
 services:
   postgres:
-    image: postgres:17.11-alpine3.24@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    image: postgres:17.11-alpine3.24@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
     restart: unless-stopped
     security_opt: [no-new-privileges:true]
     command:
